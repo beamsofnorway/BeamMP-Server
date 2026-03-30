@@ -46,6 +46,7 @@ public:
     // pass all possible names for this argument (short, long, etc)
     bool FoundArgument(const std::vector<std::string>& Names);
     std::optional<std::string> GetValueOfArgument(const std::vector<std::string>& Names);
+    std::vector<std::string> GetValuesOfArgument(const std::vector<std::string>& Names);
 
 private:
     void ConsumeLongAssignment(const std::string& Arg);

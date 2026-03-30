@@ -39,6 +39,8 @@ enum class Key {
 };
 
 std::optional<std::string> Get(Key key);
+bool Set(Key key, std::string_view value);
+bool Set(std::string_view key, std::string_view value);
 
 std::string_view ToString(Key key);
 

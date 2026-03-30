@@ -88,6 +88,19 @@ std::optional<std::string> ArgsParser::GetValueOfArgument(const std::vector<std:
     }
 }
 
+std::vector<std::string> ArgsParser::GetValuesOfArgument(const std::vector<std::string>& Names) {
+    std::vector<std::string> Values;
+    for (const auto& Arg : mFoundArgs) {
+        const bool NameMatches = std::any_of(Names.begin(), Names.end(), [&Arg](const std::string_view& Name) -> bool {
+            return Arg.Name == Name;
+        });
+        if (NameMatches && Arg.Value.has_value()) {
+            Values.push_back(*Arg.Value);
+        }
+    }
+    return Values;
+}
+
 bool ArgsParser::IsRegistered(const std::string& Name) {
     return std::any_of(mRegisteredArguments.begin(), mRegisteredArguments.end(), [&Name](const RegisteredArgument& Arg) {
         auto Iter = std::find(Arg.Names.begin(), Arg.Names.end(), Name);
@@ -96,8 +109,9 @@ bool ArgsParser::IsRegistered(const std::string& Name) {
 }
 
 void ArgsParser::ConsumeLongAssignment(const std::string& Arg) {
-    auto Value = Arg.substr(Arg.rfind("=") + 1);
-    auto Name = Arg.substr(2, Arg.rfind("=") - 2);
+    const auto Separator = Arg.find('=');
+    auto Value = Arg.substr(Separator + 1);
+    auto Name = Arg.substr(2, Separator - 2);
     if (!IsRegistered(Name)) {
         beammp_warn("Argument '" + Name + "' was supplied but isn't a known argument, so it is likely being ignored.");
     }
@@ -163,6 +177,16 @@ TEST_CASE("ArgsParser") {
         CHECK(parser.GetValueOfArgument({ "a" }).has_value());
         CHECK(parser.GetValueOfArgument({ "a" }).value() == "5");
         CHECK(!parser.GetValueOfArgument({ "hello" }).has_value());
+    }
+
+    SUBCASE("Repeated value args") {
+        parser.RegisterArgument({ "setting" }, ArgsParser::Flags::HAS_VALUE);
+        parser.Parse({ "--setting=General.Name=One", "--setting=General.Port=30814" });
+        CHECK(parser.Verify());
+        const auto Values = parser.GetValuesOfArgument({ "setting" });
+        REQUIRE_EQ(Values.size(), 2);
+        CHECK_EQ(Values[0], "General.Name=One");
+        CHECK_EQ(Values[1], "General.Port=30814");
     }
 
     SUBCASE("Required args") {

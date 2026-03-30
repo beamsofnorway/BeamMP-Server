@@ -19,6 +19,12 @@
 #include "Env.h"
 #include <optional>
 
+#ifdef BEAMMP_WINDOWS
+#include <cstdlib>
+#else
+#include <cstdlib>
+#endif
+
 std::optional<std::string> Env::Get(Env::Key key) {
     auto StrKey = ToString(key);
     auto Value = std::getenv(StrKey.data());
@@ -26,6 +32,19 @@ std::optional<std::string> Env::Get(Env::Key key) {
         return std::nullopt;
     }
     return Value;
+}
+
+bool Env::Set(Env::Key key, std::string_view value) {
+    auto StrKey = ToString(key);
+    return Set(StrKey, value);
+}
+
+bool Env::Set(std::string_view key, std::string_view value) {
+#ifdef _WIN32
+    return _putenv_s(std::string(key).c_str(), std::string(value).c_str()) == 0;
+#else
+    return setenv(std::string(key).c_str(), std::string(value).c_str(), 1) == 0;
+#endif
 }
 
 std::string_view Env::ToString(Env::Key key) {
