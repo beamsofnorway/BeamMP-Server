@@ -87,6 +87,12 @@ struct Settings {
         General_Debug,
         General_AllowGuests,
         General_InformationPacket,
+
+        // [HttpApi]
+        HttpApi_Enabled,
+        HttpApi_Host,
+        HttpApi_Port,
+        HttpApi_Token,
     };
 
     Sync<std::unordered_map<Key, SettingsTypeVariant>> SettingsMap;

@@ -20,10 +20,15 @@
 
 #include "Cryptography.h"
 #include "commandline.h"
+
+#include <nlohmann/json.hpp>
 #include <atomic>
+#include <cstdint>
+#include <deque>
 #include <fstream>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <tuple>
 #include <unordered_map>
@@ -33,6 +38,20 @@ class TLuaEngine;
 
 class TConsole {
 public:
+    struct TLogEntry {
+        uint64_t Sequence {};
+        int64_t UnixTimestampMs {};
+        std::string Line;
+    };
+
+    struct TEventEntry {
+        uint64_t Sequence {};
+        int64_t UnixTimestampMs {};
+        std::string Type;
+        std::string Category;
+        nlohmann::json Data;
+    };
+
     TConsole();
 
     // Initializes the commandline app to take over I/O
@@ -40,6 +59,11 @@ public:
 
     void Write(const std::string& str);
     void WriteRaw(const std::string& str);
+    void RecordEvent(std::string Type, std::string Category, nlohmann::json Data = {});
+    [[nodiscard]] std::vector<TLogEntry> RecentLogEntries(size_t Limit = 100, std::optional<uint64_t> AfterSequence = std::nullopt) const;
+    [[nodiscard]] std::vector<TEventEntry> RecentEventEntries(size_t Limit = 100, std::optional<uint64_t> AfterSequence = std::nullopt) const;
+    [[nodiscard]] uint64_t LatestLogSequence() const;
+    [[nodiscard]] uint64_t LatestEventSequence() const;
     void InitializeLuaConsole(TLuaEngine& Engine);
     void BackupOldLog();
     void StartLoggingToFile();
@@ -95,4 +119,12 @@ private:
     const std::string mDefaultStateId = "BEAMMP_SERVER_CONSOLE";
     std::ofstream mLogFileStream;
     std::mutex mLogFileStreamMtx;
+    mutable std::mutex mRecentLogMutex;
+    std::deque<TLogEntry> mRecentLogEntries;
+    uint64_t mNextLogSequence { 1 };
+    static constexpr size_t mMaxRecentLogEntries = 1000;
+    mutable std::mutex mRecentEventMutex;
+    std::deque<TEventEntry> mRecentEventEntries;
+    uint64_t mNextEventSequence { 1 };
+    static constexpr size_t mMaxRecentEventEntries = 1000;
 };

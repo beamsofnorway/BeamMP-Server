@@ -23,10 +23,12 @@
 #include "Client.h"
 #include "CustomAssert.h"
 #include "LuaAPI.h"
+#include "TControlService.h"
 #include "TLuaEngine.h"
 #include "Http.h"
 
 #include <ctime>
+#include <chrono>
 #include <lua.hpp>
 #include <mutex>
 #include <openssl/opensslv.h>
@@ -58,6 +60,12 @@ static inline std::string TrimString(std::string S) {
     }).base(),
         S.end());
     return S;
+}
+
+static int64_t UnixTimestampMsNow() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch())
+        .count();
 }
 
 TEST_CASE("TrimString") {
@@ -326,29 +334,16 @@ void TConsole::Command_Kick(const std::string&, const std::vector<std::string>& 
         Reason = ConcatArgs({ args.begin() + 1, args.end() });
     }
     beammp_trace("attempt to kick '" + Name + "' for '" + Reason + "'");
-    bool Kicked = false;
-    // TODO: this sucks, tolower is locale-dependent.
-    auto NameCompare = [](std::string Name1, std::string Name2) -> bool {
-        std::for_each(Name1.begin(), Name1.end(), [](char& c) { c = char(std::tolower(char(c))); });
-        std::for_each(Name2.begin(), Name2.end(), [](char& c) { c = char(std::tolower(char(c))); });
-        return StringStartsWith(Name1, Name2) || StringStartsWith(Name2, Name1);
-    };
-    mLuaEngine->Server().ForEachClient([&](std::weak_ptr<TClient> Client) -> bool {
-        if (!Client.expired()) {
-            auto locked = Client.lock();
-            if (NameCompare(locked->GetName(), Name)) {
-                mLuaEngine->Network().ClientKick(*locked, Reason);
-                Kicked = true;
-                return false;
-            }
-        }
-        return true;
+    auto Result = Application::Control().Execute("players.kick", {
+        { "name", Name },
+        { "reason", Reason },
+        { "prefix_match", true },
     });
-    if (!Kicked) {
-        Application::Console().WriteRaw("Error: No player with name matching '" + Name + "' was found.");
-    } else {
-        Application::Console().WriteRaw("Kicked player '" + Name + "' for reason: '" + Reason + "'.");
+    if (!Result.at("ok").get<bool>()) {
+        Application::Console().WriteRaw("Error: " + Result.at("error").get<std::string>());
+        return;
     }
+    Application::Console().WriteRaw("Kicked player '" + Result.at("data").at("player").at("name").get<std::string>() + "' for reason: '" + Reason + "'.");
 }
 
 std::tuple<std::string, std::vector<std::string>> TConsole::ParseCommand(const std::string& CommandWithArgs) {
@@ -549,8 +544,13 @@ void TConsole::Command_Settings(const std::string&, const std::vector<std::strin
 void TConsole::Command_Say(const std::string& FullCmd) {
     if (FullCmd.size() > 3) {
         auto Message = FullCmd.substr(4);
-        LuaAPI::MP::SendChatMessage(-1, Message);
-        if (!Application::Settings.getAsBool(Settings::Key::General_LogChat)) {
+        auto Result = Application::Control().Execute("chat.send", {
+            { "target_id", -1 },
+            { "message", Message },
+        });
+        if (!Result.at("ok").get<bool>()) {
+            Application::Console().WriteRaw("Error: " + Result.at("error").get<std::string>());
+        } else if (!Application::Settings.getAsBool(Settings::Key::General_LogChat)) {
             Application::Console().WriteRaw("Chat message sent!");
         }
     }
@@ -560,20 +560,22 @@ void TConsole::Command_List(const std::string&, const std::vector<std::string>& 
     if (!EnsureArgsCount(args, 0)) {
         return;
     }
-    if (mLuaEngine->Server().ClientCount() == 0) {
+    auto Result = Application::Control().Execute("players.list");
+    if (!Result.at("ok").get<bool>()) {
+        Application::Console().WriteRaw("Error: " + Result.at("error").get<std::string>());
+        return;
+    }
+    const auto& Players = Result.at("data").at("players");
+    if (Players.empty()) {
         Application::Console().WriteRaw("No players online.");
     } else {
         std::stringstream ss;
         ss << std::left << std::setw(25) << "Name" << std::setw(6) << "ID" << std::setw(6) << "Cars" << std::endl;
-        mLuaEngine->Server().ForEachClient([&](std::weak_ptr<TClient> Client) -> bool {
-            if (!Client.expired()) {
-                auto locked = Client.lock();
-                ss << std::left << std::setw(25) << locked->GetName()
-                   << std::setw(6) << locked->GetID()
-                   << std::setw(6) << locked->GetCarCount() << "\n";
-            }
-            return true;
-        });
+        for (const auto& Player : Players) {
+            ss << std::left << std::setw(25) << Player.at("name").get<std::string>()
+               << std::setw(6) << Player.at("id").get<int>()
+               << std::setw(6) << Player.at("cars").get<int>() << "\n";
+        }
         auto Str = ss.str();
         Application::Console().WriteRaw(Str.substr(0, Str.size() - 1));
     }
@@ -583,98 +585,53 @@ void TConsole::Command_Status(const std::string&, const std::vector<std::string>
     if (!EnsureArgsCount(args, 0)) {
         return;
     }
+    auto Result = Application::Control().Execute("server.status");
+    if (!Result.at("ok").get<bool>()) {
+        Application::Console().WriteRaw("Error: " + Result.at("error").get<std::string>());
+        return;
+    }
+
+    const auto& Data = Result.at("data");
+    const auto& Players = Data.at("players");
+    const auto& Lua = Data.at("lua");
+    const auto& Subsystems = Data.at("subsystems");
+    const auto& Counts = Subsystems.at("counts");
     std::stringstream Status;
 
-    size_t CarCount = 0;
-    size_t ConnectedCount = 0;
-    size_t GuestCount = 0;
-    size_t SyncedCount = 0;
-    size_t SyncingCount = 0;
-    size_t MissedPacketQueueSum = 0;
-    int LargestSecondsSinceLastPing = 0;
-    mLuaEngine->Server().ForEachClient([&](std::weak_ptr<TClient> Client) -> bool {
-        if (!Client.expired()) {
-            auto Locked = Client.lock();
-            CarCount += Locked->GetCarCount();
-            ConnectedCount += Locked->IsUDPConnected() ? 1 : 0;
-            GuestCount += Locked->IsGuest() ? 1 : 0;
-            SyncedCount += Locked->IsSynced() ? 1 : 0;
-            SyncingCount += Locked->IsSyncing() ? 1 : 0;
-            MissedPacketQueueSum += Locked->MissedPacketQueueSize();
-            if (Locked->SecondsSinceLastPing() < LargestSecondsSinceLastPing) {
-                LargestSecondsSinceLastPing = Locked->SecondsSinceLastPing();
+    auto JoinSubsystems = [](const nlohmann::json& Systems, const std::string& Name) {
+        std::string Out;
+        for (const auto& System : Systems) {
+            if (System.at("status").get<std::string>() == Name) {
+                if (!Out.empty()) {
+                    Out += ", ";
+                }
+                Out += System.at("name").get<std::string>();
             }
         }
-        return true;
-    });
-
-    size_t SystemsStarting = 0;
-    size_t SystemsGood = 0;
-    size_t SystemsBad = 0;
-    size_t SystemsShuttingDown = 0;
-    size_t SystemsShutdown = 0;
-    std::string SystemsBadList {};
-    std::string SystemsGoodList {};
-    std::string SystemsStartingList {};
-    std::string SystemsShuttingDownList {};
-    std::string SystemsShutdownList {};
-    auto Statuses = Application::GetSubsystemStatuses();
-    for (const auto& NameStatusPair : Statuses) {
-        switch (NameStatusPair.second) {
-        case Application::Status::Good:
-            SystemsGood++;
-            SystemsGoodList += NameStatusPair.first + ", ";
-            break;
-        case Application::Status::Bad:
-            SystemsBad++;
-            SystemsBadList += NameStatusPair.first + ", ";
-            break;
-        case Application::Status::Starting:
-            SystemsStarting++;
-            SystemsStartingList += NameStatusPair.first + ", ";
-            break;
-        case Application::Status::ShuttingDown:
-            SystemsShuttingDown++;
-            SystemsShuttingDownList += NameStatusPair.first + ", ";
-            break;
-        case Application::Status::Shutdown:
-            SystemsShutdown++;
-            SystemsShutdownList += NameStatusPair.first + ", ";
-            break;
-        default:
-            beammp_assert_not_reachable();
-        }
-    }
-    // remove ", " at the end
-    SystemsBadList = SystemsBadList.substr(0, SystemsBadList.size() - 2);
-    SystemsGoodList = SystemsGoodList.substr(0, SystemsGoodList.size() - 2);
-    SystemsStartingList = SystemsStartingList.substr(0, SystemsStartingList.size() - 2);
-    SystemsShuttingDownList = SystemsShuttingDownList.substr(0, SystemsShuttingDownList.size() - 2);
-    SystemsShutdownList = SystemsShutdownList.substr(0, SystemsShutdownList.size() - 2);
-
-    auto ElapsedTime = mLuaEngine->Server().UptimeTimer.GetElapsedTime();
+        return Out;
+    };
 
     Status << "BeamMP-Server Status:\n"
-           << "\tTotal Players:             " << mLuaEngine->Server().ClientCount() << "\n"
-           << "\tSyncing Players:           " << SyncingCount << "\n"
-           << "\tSynced Players:            " << SyncedCount << "\n"
-           << "\tConnected Players:         " << ConnectedCount << "\n"
-           << "\tGuests:                    " << GuestCount << "\n"
-           << "\tCars:                      " << CarCount << "\n"
-           << "\tUptime:                    " << ElapsedTime << "ms (~" << size_t(double(ElapsedTime) / 1000.0 / 60.0 / 60.0) << "h) \n"
+           << "\tTotal Players:             " << Players.at("total").get<size_t>() << "\n"
+           << "\tSyncing Players:           " << Players.at("syncing").get<size_t>() << "\n"
+           << "\tSynced Players:            " << Players.at("synced").get<size_t>() << "\n"
+           << "\tConnected Players:         " << Players.at("udp_connected").get<size_t>() << "\n"
+           << "\tGuests:                    " << Players.at("guests").get<size_t>() << "\n"
+           << "\tCars:                      " << Data.at("cars").get<size_t>() << "\n"
+           << "\tUptime:                    " << Data.at("uptime_ms").get<size_t>() << "ms (~" << size_t(double(Data.at("uptime_ms").get<size_t>()) / 1000.0 / 60.0 / 60.0) << "h) \n"
            << "\tLua:\n"
-           << "\t\tQueued results to check:     " << mLuaEngine->GetResultsToCheckSize() << "\n"
-           << "\t\tStates:                      " << mLuaEngine->GetLuaStateCount() << "\n"
-           << "\t\tEvent timers:                " << mLuaEngine->GetTimedEventsCount() << "\n"
-           << "\t\tEvent handlers:              " << mLuaEngine->GetRegisteredEventHandlerCount() << "\n"
+           << "\t\tQueued results to check:     " << Lua.at("queued_results_to_check").get<size_t>() << "\n"
+           << "\t\tStates:                      " << Lua.at("states").get<size_t>() << "\n"
+           << "\t\tEvent timers:                " << Lua.at("event_timers").get<size_t>() << "\n"
+           << "\t\tEvent handlers:              " << Lua.at("event_handlers").get<size_t>() << "\n"
            << "\tSubsystems:\n"
-           << "\t\tGood/Starting/Bad:           " << SystemsGood << "/" << SystemsStarting << "/" << SystemsBad << "\n"
-           << "\t\tShutting down/Shut down:     " << SystemsShuttingDown << "/" << SystemsShutdown << "\n"
-           << "\t\tGood:                        [ " << SystemsGoodList << " ]\n"
-           << "\t\tStarting:                    [ " << SystemsStartingList << " ]\n"
-           << "\t\tBad:                         [ " << SystemsBadList << " ]\n"
-           << "\t\tShutting down:               [ " << SystemsShuttingDownList << " ]\n"
-           << "\t\tShut down:                   [ " << SystemsShutdownList << " ]\n"
+           << "\t\tGood/Starting/Bad:           " << Counts.at("good").get<size_t>() << "/" << Counts.at("starting").get<size_t>() << "/" << Counts.at("bad").get<size_t>() << "\n"
+           << "\t\tShutting down/Shut down:     " << Counts.at("shutting_down").get<size_t>() << "/" << Counts.at("shutdown").get<size_t>() << "\n"
+           << "\t\tGood:                        [ " << JoinSubsystems(Subsystems.at("systems"), "good") << " ]\n"
+           << "\t\tStarting:                    [ " << JoinSubsystems(Subsystems.at("systems"), "starting") << " ]\n"
+           << "\t\tBad:                         [ " << JoinSubsystems(Subsystems.at("systems"), "bad") << " ]\n"
+           << "\t\tShutting down:               [ " << JoinSubsystems(Subsystems.at("systems"), "shutting_down") << " ]\n"
+           << "\t\tShut down:                   [ " << JoinSubsystems(Subsystems.at("systems"), "shutdown") << " ]\n"
            << "";
 
     Application::Console().WriteRaw(Status.str());
@@ -897,6 +854,13 @@ void TConsole::InitializeCommandline() {
 
 void TConsole::Write(const std::string& str) {
     auto ToWrite = GetDate() + str;
+    {
+        std::unique_lock Lock(mRecentLogMutex);
+        mRecentLogEntries.push_back({ mNextLogSequence++, UnixTimestampMsNow(), ToWrite });
+        while (mRecentLogEntries.size() > mMaxRecentLogEntries) {
+            mRecentLogEntries.pop_front();
+        }
+    }
     // allows writing to stdout without an initialized console
     if (mCommandline) {
         mCommandline->write(ToWrite);
@@ -906,12 +870,69 @@ void TConsole::Write(const std::string& str) {
 }
 
 void TConsole::WriteRaw(const std::string& str) {
+    {
+        std::unique_lock Lock(mRecentLogMutex);
+        mRecentLogEntries.push_back({ mNextLogSequence++, UnixTimestampMsNow(), str });
+        while (mRecentLogEntries.size() > mMaxRecentLogEntries) {
+            mRecentLogEntries.pop_front();
+        }
+    }
     // allows writing to stdout without an initialized console
     if (mCommandline) {
         mCommandline->write(str);
     } else {
         std::cout << str << std::endl;
     }
+}
+
+void TConsole::RecordEvent(std::string Type, std::string Category, nlohmann::json Data) {
+    std::unique_lock Lock(mRecentEventMutex);
+    mRecentEventEntries.push_back({ mNextEventSequence++, UnixTimestampMsNow(), std::move(Type), std::move(Category), std::move(Data) });
+    while (mRecentEventEntries.size() > mMaxRecentEventEntries) {
+        mRecentEventEntries.pop_front();
+    }
+}
+
+std::vector<TConsole::TLogEntry> TConsole::RecentLogEntries(size_t Limit, std::optional<uint64_t> AfterSequence) const {
+    std::vector<TLogEntry> Entries;
+    std::unique_lock Lock(mRecentLogMutex);
+    Entries.reserve(std::min(Limit, mRecentLogEntries.size()));
+    for (const auto& Entry : mRecentLogEntries) {
+        if (AfterSequence.has_value() && Entry.Sequence <= *AfterSequence) {
+            continue;
+        }
+        Entries.push_back(Entry);
+        if (Entries.size() >= Limit) {
+            break;
+        }
+    }
+    return Entries;
+}
+
+std::vector<TConsole::TEventEntry> TConsole::RecentEventEntries(size_t Limit, std::optional<uint64_t> AfterSequence) const {
+    std::vector<TEventEntry> Entries;
+    std::unique_lock Lock(mRecentEventMutex);
+    Entries.reserve(std::min(Limit, mRecentEventEntries.size()));
+    for (const auto& Entry : mRecentEventEntries) {
+        if (AfterSequence.has_value() && Entry.Sequence <= *AfterSequence) {
+            continue;
+        }
+        Entries.push_back(Entry);
+        if (Entries.size() >= Limit) {
+            break;
+        }
+    }
+    return Entries;
+}
+
+uint64_t TConsole::LatestLogSequence() const {
+    std::unique_lock Lock(mRecentLogMutex);
+    return mRecentLogEntries.empty() ? 0 : mRecentLogEntries.back().Sequence;
+}
+
+uint64_t TConsole::LatestEventSequence() const {
+    std::unique_lock Lock(mRecentEventMutex);
+    return mRecentEventEntries.empty() ? 0 : mRecentEventEntries.back().Sequence;
 }
 
 void TConsole::InitializeLuaConsole(TLuaEngine& Engine) {

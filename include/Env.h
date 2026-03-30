@@ -20,6 +20,7 @@
 
 #include <optional>
 #include <string>
+#include <string_view>
 namespace Env {
 
 enum class Key {
@@ -28,7 +29,13 @@ enum class Key {
     PROVIDER_DISABLE_CONFIG,
     PROVIDER_DISABLE_MP_SET,
     PROVIDER_PORT_ENV,
-    PROVIDER_IP_ENV
+    PROVIDER_IP_ENV,
+
+    // HTTP API settings
+    HTTP_API_ENABLED,
+    HTTP_API_HOST,
+    HTTP_API_PORT,
+    HTTP_API_TOKEN
 };
 
 std::optional<std::string> Get(Key key);

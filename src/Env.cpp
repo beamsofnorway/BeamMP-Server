@@ -45,6 +45,18 @@ std::string_view Env::ToString(Env::Key key) {
     case Key::PROVIDER_IP_ENV:
         return "BEAMMP_PROVIDER_IP_ENV";
         break;
+    case Key::HTTP_API_ENABLED:
+        return "BEAMMP_HTTP_API_ENABLED";
+        break;
+    case Key::HTTP_API_HOST:
+        return "BEAMMP_HTTP_API_HOST";
+        break;
+    case Key::HTTP_API_PORT:
+        return "BEAMMP_HTTP_API_PORT";
+        break;
+    case Key::HTTP_API_TOKEN:
+        return "BEAMMP_HTTP_API_TOKEN";
+        break;
     }
     return "";
 }

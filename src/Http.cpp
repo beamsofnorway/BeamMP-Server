@@ -18,13 +18,15 @@
 
 #include "Http.h"
 
-#include "Client.h"
 #include "Common.h"
 #include "CustomAssert.h"
-#include "LuaAPI.h"
+#include "Env.h"
+#include "TControlService.h"
 
+#include <cstdint>
 #include <map>
 #include <nlohmann/json.hpp>
+#include <optional>
 #include <random>
 #include <stdexcept>
 
@@ -199,6 +201,182 @@ static const char Magic[] = {
     0x3c, 0x0a, 0x00
 };
 
+namespace {
+using HttpHandler = std::function<void(const httplib::Request&, httplib::Response&)>;
+
+bool EnvBool(Env::Key Key, bool DefaultValue) {
+    auto Value = Env::Get(Key);
+    if (!Value.has_value()) {
+        return DefaultValue;
+    }
+
+    auto Lowered = LowerString(*Value);
+    if (Lowered == "0" || Lowered == "false" || Lowered == "no" || Lowered == "off") {
+        return false;
+    }
+    if (Lowered == "1" || Lowered == "true" || Lowered == "yes" || Lowered == "on") {
+        return true;
+    }
+    return DefaultValue;
+}
+
+uint16_t EnvPort(Env::Key Key, uint16_t DefaultValue) {
+    auto Value = Env::Get(Key);
+    if (!Value.has_value()) {
+        return DefaultValue;
+    }
+
+    try {
+        const auto Parsed = std::stoul(*Value);
+        if (Parsed == 0 || Parsed > UINT16_MAX) {
+            throw std::out_of_range("port out of range");
+        }
+        return static_cast<uint16_t>(Parsed);
+    } catch (const std::exception&) {
+        beammp_warn("Invalid HTTP API port in BEAMMP_HTTP_API_PORT, falling back to default");
+        return DefaultValue;
+    }
+}
+
+uint16_t DefaultHttpApiPort() {
+    const auto ServerPort = Application::Settings.getAsInt(Settings::Key::General_Port);
+    return static_cast<uint16_t>(ServerPort >= int(UINT16_MAX) ? UINT16_MAX - 1 : ServerPort + 1);
+}
+
+bool IsLoopbackAddress(const std::string& Address) {
+    return Address == "127.0.0.1" || Address == "::1" || Address == "::ffff:127.0.0.1" || Address == "localhost";
+}
+
+bool GetBoolParam(const httplib::Request& Req, const std::string& Name, bool DefaultValue) {
+    if (!Req.has_param(Name)) {
+        return DefaultValue;
+    }
+    auto Value = LowerString(Req.get_param_value(Name));
+    if (Value == "1" || Value == "true" || Value == "yes" || Value == "on") {
+        return true;
+    }
+    if (Value == "0" || Value == "false" || Value == "no" || Value == "off") {
+        return false;
+    }
+    return DefaultValue;
+}
+
+std::optional<int> GetIntParam(const httplib::Request& Req, const std::string& Name) {
+    if (!Req.has_param(Name)) {
+        return std::nullopt;
+    }
+    try {
+        return std::stoi(Req.get_param_value(Name));
+    } catch (const std::exception&) {
+        return std::nullopt;
+    }
+}
+
+json ParseJsonBody(const httplib::Request& Req) {
+    if (Req.body.empty()) {
+        return json::object();
+    }
+    return json::parse(Req.body);
+}
+
+void SetJson(httplib::Response& Res, const json& Body, int Status = 200) {
+    Res.status = Status;
+    Res.set_content(Body.dump(), "application/json");
+}
+
+void SetApiError(httplib::Response& Res, int Status, const std::string& Message) {
+    SetJson(Res, {
+        { "ok", false },
+        { "error", Message },
+    }, Status);
+}
+
+json ExecuteControlAction(const std::string& Action, json Payload = {}) {
+    return Application::Control().Execute(Action, std::move(Payload));
+}
+
+void HandleControlAction(httplib::Response& Res, const std::string& Action, json Payload = {}) {
+    const auto Result = ExecuteControlAction(Action, std::move(Payload));
+    SetJson(Res, Result, Result.value("ok", false) ? 200 : 400);
+}
+
+bool IsAuthorized(const httplib::Request& Req, const std::string& Token) {
+    if (Token.empty()) {
+        return IsLoopbackAddress(Req.remote_addr);
+    }
+
+    const auto Header = Req.get_header_value("Authorization");
+    const std::string Prefix = "Bearer ";
+    if (!Header.starts_with(Prefix)) {
+        return false;
+    }
+    return Header.substr(Prefix.size()) == Token;
+}
+
+HttpHandler RequireApiAuth(std::string Token, HttpHandler Next) {
+    return [Token = std::move(Token), Next = std::move(Next)](const httplib::Request& Req, httplib::Response& Res) {
+        if (!IsAuthorized(Req, Token)) {
+            if (!Token.empty()) {
+                Res.set_header("WWW-Authenticate", "Bearer realm=\"BeamMP HTTP API\"");
+                SetApiError(Res, 401, "Missing or invalid bearer token");
+            } else {
+                SetApiError(Res, 403, "HTTP API is limited to loopback clients unless BEAMMP_HTTP_API_TOKEN is set");
+            }
+            return;
+        }
+        Next(Req, Res);
+    };
+}
+
+json DescribeHttpApi(bool TokenConfigured, const std::string& BindAddress, uint16_t Port) {
+    return {
+        { "ok", true },
+        { "data", {
+              { "name", "BeamMP HTTP API" },
+              { "bind_address", BindAddress },
+              { "port", Port },
+              { "auth", TokenConfigured ? "bearer_token" : "loopback_only" },
+              { "endpoints", json::array({
+                    "/health",
+                    "/api",
+                    "/api/actions",
+                    "/api/logs/recent",
+                    "/api/events/recent",
+                    "/api/server/status",
+                    "/api/server/version",
+                    "/api/server/subsystems",
+                    "/api/lua/states",
+                    "/api/players",
+                    "/api/players/find",
+                    "/api/players/get",
+                    "/api/players/disconnect",
+                    "/api/players/vehicles",
+                    "/api/players/vehicle-positions",
+                    "/api/players/vehicle-position",
+                    "/api/players/vehicle-position/raw",
+                    "/api/players/vehicle-position/parsed",
+                    "/api/vehicles",
+                    "/api/vehicles/positions",
+                    "/api/chat/send",
+                    "/api/players/kick",
+                    "/api/settings",
+                    "/api/settings/get",
+                    "/api/settings/set",
+                    "/api/mods",
+                    "/api/mods/reload",
+                    "/api/mods/protection",
+                    "/api/notifications/send",
+                    "/api/dialogs/confirmation",
+                    "/api/events/trigger-client",
+                    "/api/spatial/teleport",
+                    "/api/spatial/rebase",
+                    "/api/vehicles/remove",
+                }) },
+          } },
+    };
+}
+}
+
 std::string Http::Status::ToString(int Code) {
     if (Map.find(Code) != Map.end()) {
         return Map.at(Code);
@@ -214,20 +392,55 @@ TEST_CASE("Http::Status::ToString") {
 }
 
 Http::Server::THttpServerInstance::THttpServerInstance() {
+    const auto DefaultPort = DefaultHttpApiPort();
+    mEnabled = Application::Settings.getAsBool(Settings::Key::HttpApi_Enabled);
+    mBindAddress = Application::Settings.getAsString(Settings::Key::HttpApi_Host);
+    mPort = static_cast<uint16_t>(Application::Settings.getAsInt(Settings::Key::HttpApi_Port));
+    mAuthToken = Application::Settings.getAsString(Settings::Key::HttpApi_Token);
+
+    mEnabled = EnvBool(Env::Key::HTTP_API_ENABLED, mEnabled);
+    mBindAddress = Env::Get(Env::Key::HTTP_API_HOST).value_or(mBindAddress);
+    mPort = EnvPort(Env::Key::HTTP_API_PORT, mPort == 0 ? DefaultPort : mPort);
+    mAuthToken = Env::Get(Env::Key::HTTP_API_TOKEN).value_or(mAuthToken);
+
+    if (mBindAddress.empty()) {
+        mBindAddress = "127.0.0.1";
+    }
+    if (mPort == 0) {
+        mPort = DefaultPort;
+    }
+
+    if (!mEnabled) {
+        Application::SetSubsystemStatus("HTTPServer", Application::Status::Shutdown);
+        beammp_info("HTTP API disabled via BEAMMP_HTTP_API_ENABLED");
+        return;
+    }
+
     Application::SetSubsystemStatus("HTTPServer", Application::Status::Starting);
+    mServer = std::make_shared<httplib::Server>();
     mThread = std::thread(&Http::Server::THttpServerInstance::operator(), this);
-    mThread.detach();
+}
+
+Http::Server::THttpServerInstance::~THttpServerInstance() {
+    if (mServer) {
+        mServer->stop();
+    }
+    if (mThread.joinable()) {
+        mThread.join();
+    }
+    if (mEnabled) {
+        Application::SetSubsystemStatus("HTTPServer", Application::Status::Shutdown);
+    }
 }
 
 void Http::Server::THttpServerInstance::operator()() try {
-    std::unique_ptr<httplib::Server> HttpLibServerInstance;
-    HttpLibServerInstance = std::make_unique<httplib::Server>();
-    // todo: make this IP agnostic so people can set their own IP
-    HttpLibServerInstance->Get("/", [](const httplib::Request&, httplib::Response& res) {
-        res.set_content("<!DOCTYPE html><article><h1>Hello World!</h1><section><p>BeamMP Server can now serve HTTP requests!</p></section></article></html>", "text/html");
+    RegisterThread("HTTPServer");
+    auto& HttpLibServerInstance = *mServer;
+
+    HttpLibServerInstance.Get("/", [this](const httplib::Request&, httplib::Response& Res) {
+        SetJson(Res, DescribeHttpApi(!mAuthToken.empty(), mBindAddress, mPort));
     });
-    HttpLibServerInstance->Get("/health", [](const httplib::Request&, httplib::Response& res) {
-        size_t SystemsGood = 0;
+    HttpLibServerInstance.Get("/health", [](const httplib::Request&, httplib::Response& Res) {
         size_t SystemsBad = 0;
         auto Statuses = Application::GetSubsystemStatuses();
         for (const auto& NameStatusPair : Statuses) {
@@ -236,7 +449,6 @@ void Http::Server::THttpServerInstance::operator()() try {
             case Application::Status::ShuttingDown:
             case Application::Status::Shutdown:
             case Application::Status::Good:
-                SystemsGood++;
                 break;
             case Application::Status::Bad:
                 SystemsBad++;
@@ -245,22 +457,364 @@ void Http::Server::THttpServerInstance::operator()() try {
                 beammp_assert_not_reachable();
             }
         }
-        res.set_content(
-            json {
-                { "ok", SystemsBad == 0 },
+        SetJson(Res, {
+            { "ok", SystemsBad == 0 },
+        });
+    });
+    HttpLibServerInstance.Get({ 0x2f, 0x6b, 0x69, 0x74, 0x74, 0x79 }, [](const httplib::Request&, httplib::Response& Res) {
+        Res.set_content(std::string(Magic), "text/plain");
+    });
+
+    const auto Authed = [this](HttpHandler Next) {
+        return RequireApiAuth(mAuthToken, std::move(Next));
+    };
+
+    HttpLibServerInstance.Get("/api", Authed([this](const httplib::Request&, httplib::Response& Res) {
+        SetJson(Res, DescribeHttpApi(!mAuthToken.empty(), mBindAddress, mPort));
+    }));
+    HttpLibServerInstance.Get("/api/actions", Authed([](const httplib::Request&, httplib::Response& Res) {
+        HandleControlAction(Res, "system.describe_actions");
+    }));
+    HttpLibServerInstance.Get("/api/logs/recent", Authed([](const httplib::Request& Req, httplib::Response& Res) {
+        json Payload = json::object();
+        if (Req.has_param("limit")) {
+            const auto MaybeLimit = GetIntParam(Req, "limit");
+            if (!MaybeLimit.has_value() || *MaybeLimit <= 0) {
+                SetApiError(Res, 400, "Query parameter 'limit' must be a positive integer");
+                return;
             }
-                .dump(),
-            "application/json");
-        res.status = 200;
+            Payload["limit"] = *MaybeLimit;
+        }
+        if (Req.has_param("after_sequence")) {
+            const auto MaybeAfter = GetIntParam(Req, "after_sequence");
+            if (!MaybeAfter.has_value() || *MaybeAfter < 0) {
+                SetApiError(Res, 400, "Query parameter 'after_sequence' must be a non-negative integer");
+                return;
+            }
+            Payload["after_sequence"] = *MaybeAfter;
+        }
+        HandleControlAction(Res, "system.logs.recent", std::move(Payload));
+    }));
+    HttpLibServerInstance.Get("/api/events/recent", Authed([](const httplib::Request& Req, httplib::Response& Res) {
+        json Payload = json::object();
+        if (Req.has_param("limit")) {
+            const auto MaybeLimit = GetIntParam(Req, "limit");
+            if (!MaybeLimit.has_value() || *MaybeLimit <= 0) {
+                SetApiError(Res, 400, "Query parameter 'limit' must be a positive integer");
+                return;
+            }
+            Payload["limit"] = *MaybeLimit;
+        }
+        if (Req.has_param("after_sequence")) {
+            const auto MaybeAfter = GetIntParam(Req, "after_sequence");
+            if (!MaybeAfter.has_value() || *MaybeAfter < 0) {
+                SetApiError(Res, 400, "Query parameter 'after_sequence' must be a non-negative integer");
+                return;
+            }
+            Payload["after_sequence"] = *MaybeAfter;
+        }
+        HandleControlAction(Res, "system.events.recent", std::move(Payload));
+    }));
+    HttpLibServerInstance.Get("/api/server/status", Authed([](const httplib::Request&, httplib::Response& Res) {
+        HandleControlAction(Res, "server.status");
+    }));
+    HttpLibServerInstance.Get("/api/server/version", Authed([](const httplib::Request&, httplib::Response& Res) {
+        HandleControlAction(Res, "server.version");
+    }));
+    HttpLibServerInstance.Get("/api/server/subsystems", Authed([](const httplib::Request&, httplib::Response& Res) {
+        HandleControlAction(Res, "server.subsystems");
+    }));
+    HttpLibServerInstance.Get("/api/lua/states", Authed([](const httplib::Request&, httplib::Response& Res) {
+        HandleControlAction(Res, "lua.states.list");
+    }));
+    HttpLibServerInstance.Get("/api/players", Authed([](const httplib::Request& Req, httplib::Response& Res) {
+        HandleControlAction(Res, "players.list", {
+            { "include_vehicles", GetBoolParam(Req, "include_vehicles", false) },
+        });
+    }));
+    HttpLibServerInstance.Get("/api/players/get", Authed([](const httplib::Request& Req, httplib::Response& Res) {
+        json Payload = json::object();
+        if (Req.has_param("id")) {
+            const auto MaybeID = GetIntParam(Req, "id");
+            if (!MaybeID.has_value()) {
+                SetApiError(Res, 400, "Query parameter 'id' must be an integer");
+                return;
+            }
+            Payload["id"] = *MaybeID;
+        } else if (Req.has_param("name")) {
+            Payload["name"] = Req.get_param_value("name");
+            Payload["prefix_match"] = GetBoolParam(Req, "prefix_match", true);
+        } else {
+            SetApiError(Res, 400, "Expected query parameter 'id' or 'name'");
+            return;
+        }
+        HandleControlAction(Res, "players.get", std::move(Payload));
+    }));
+    HttpLibServerInstance.Get("/api/players/find", Authed([](const httplib::Request& Req, httplib::Response& Res) {
+        if (!Req.has_param("name")) {
+            SetApiError(Res, 400, "Expected query parameter 'name'");
+            return;
+        }
+        json Payload = {
+            { "name", Req.get_param_value("name") },
+            { "prefix_match", GetBoolParam(Req, "prefix_match", true) },
+        };
+        if (Req.has_param("limit")) {
+            const auto MaybeLimit = GetIntParam(Req, "limit");
+            if (!MaybeLimit.has_value() || *MaybeLimit <= 0) {
+                SetApiError(Res, 400, "Query parameter 'limit' must be a positive integer");
+                return;
+            }
+            Payload["limit"] = *MaybeLimit;
+        }
+        HandleControlAction(Res, "players.find", std::move(Payload));
+    }));
+    HttpLibServerInstance.Get("/api/players/vehicles", Authed([](const httplib::Request& Req, httplib::Response& Res) {
+        json Payload = json::object();
+        if (Req.has_param("id")) {
+            const auto MaybeID = GetIntParam(Req, "id");
+            if (!MaybeID.has_value()) {
+                SetApiError(Res, 400, "Query parameter 'id' must be an integer");
+                return;
+            }
+            Payload["id"] = *MaybeID;
+        } else if (Req.has_param("name")) {
+            Payload["name"] = Req.get_param_value("name");
+            Payload["prefix_match"] = GetBoolParam(Req, "prefix_match", true);
+        } else {
+            SetApiError(Res, 400, "Expected query parameter 'id' or 'name'");
+            return;
+        }
+        Payload["include_data"] = GetBoolParam(Req, "include_data", true);
+        Payload["include_position_raw"] = GetBoolParam(Req, "include_position_raw", true);
+        Payload["include_position_parsed"] = GetBoolParam(Req, "include_position_parsed", false);
+        HandleControlAction(Res, "players.vehicles.list", std::move(Payload));
+    }));
+    HttpLibServerInstance.Get("/api/players/vehicle-positions", Authed([](const httplib::Request& Req, httplib::Response& Res) {
+        json Payload = {
+            { "include_parsed", GetBoolParam(Req, "include_parsed", true) },
+        };
+        if (Req.has_param("id")) {
+            const auto MaybeID = GetIntParam(Req, "id");
+            if (!MaybeID.has_value()) {
+                SetApiError(Res, 400, "Query parameter 'id' must be an integer");
+                return;
+            }
+            Payload["id"] = *MaybeID;
+        } else if (Req.has_param("name")) {
+            Payload["name"] = Req.get_param_value("name");
+            Payload["prefix_match"] = GetBoolParam(Req, "prefix_match", true);
+        }
+        HandleControlAction(Res, "players.vehicle_positions", std::move(Payload));
+    }));
+    HttpLibServerInstance.Get("/api/players/vehicle-position", Authed([](const httplib::Request& Req, httplib::Response& Res) {
+        if (!Req.has_param("vehicle_id")) {
+            SetApiError(Res, 400, "Expected query parameter 'vehicle_id'");
+            return;
+        }
+        const auto MaybeVehicleID = GetIntParam(Req, "vehicle_id");
+        if (!MaybeVehicleID.has_value()) {
+            SetApiError(Res, 400, "Query parameter 'vehicle_id' must be an integer");
+            return;
+        }
+        json Payload = {
+            { "vehicle_id", *MaybeVehicleID },
+            { "include_parsed", GetBoolParam(Req, "include_parsed", true) },
+        };
+        if (Req.has_param("player_id")) {
+            const auto MaybePlayerID = GetIntParam(Req, "player_id");
+            if (!MaybePlayerID.has_value()) {
+                SetApiError(Res, 400, "Query parameter 'player_id' must be an integer");
+                return;
+            }
+            Payload["player_id"] = *MaybePlayerID;
+        } else if (Req.has_param("player_name")) {
+            Payload["player_name"] = Req.get_param_value("player_name");
+            Payload["prefix_match"] = GetBoolParam(Req, "prefix_match", true);
+        } else {
+            SetApiError(Res, 400, "Expected query parameter 'player_id' or 'player_name'");
+            return;
+        }
+        HandleControlAction(Res, "players.vehicle_position", std::move(Payload));
+    }));
+    HttpLibServerInstance.Get("/api/players/vehicle-position/raw", Authed([](const httplib::Request& Req, httplib::Response& Res) {
+        if (!Req.has_param("vehicle_id")) {
+            SetApiError(Res, 400, "Expected query parameter 'vehicle_id'");
+            return;
+        }
+        const auto MaybeVehicleID = GetIntParam(Req, "vehicle_id");
+        if (!MaybeVehicleID.has_value()) {
+            SetApiError(Res, 400, "Query parameter 'vehicle_id' must be an integer");
+            return;
+        }
+        json Payload = {
+            { "vehicle_id", *MaybeVehicleID },
+            { "include_parsed", false },
+        };
+        if (Req.has_param("player_id")) {
+            const auto MaybePlayerID = GetIntParam(Req, "player_id");
+            if (!MaybePlayerID.has_value()) {
+                SetApiError(Res, 400, "Query parameter 'player_id' must be an integer");
+                return;
+            }
+            Payload["player_id"] = *MaybePlayerID;
+        } else if (Req.has_param("player_name")) {
+            Payload["player_name"] = Req.get_param_value("player_name");
+            Payload["prefix_match"] = GetBoolParam(Req, "prefix_match", true);
+        } else {
+            SetApiError(Res, 400, "Expected query parameter 'player_id' or 'player_name'");
+            return;
+        }
+        const auto Result = ExecuteControlAction("players.vehicle_position", std::move(Payload));
+        if (!Result.value("ok", false)) {
+            SetJson(Res, Result, 400);
+            return;
+        }
+        const auto& Vehicle = Result.at("data").at("vehicle");
+        SetJson(Res, {
+            { "ok", true },
+            { "player", Result.at("data").at("player") },
+            { "vehicle_id", Vehicle.at("vehicle_id") },
+            { "position_raw", Vehicle.at("position_raw") },
+        });
+    }));
+    HttpLibServerInstance.Get("/api/players/vehicle-position/parsed", Authed([](const httplib::Request& Req, httplib::Response& Res) {
+        if (!Req.has_param("vehicle_id")) {
+            SetApiError(Res, 400, "Expected query parameter 'vehicle_id'");
+            return;
+        }
+        const auto MaybeVehicleID = GetIntParam(Req, "vehicle_id");
+        if (!MaybeVehicleID.has_value()) {
+            SetApiError(Res, 400, "Query parameter 'vehicle_id' must be an integer");
+            return;
+        }
+        json Payload = {
+            { "vehicle_id", *MaybeVehicleID },
+            { "include_parsed", true },
+        };
+        if (Req.has_param("player_id")) {
+            const auto MaybePlayerID = GetIntParam(Req, "player_id");
+            if (!MaybePlayerID.has_value()) {
+                SetApiError(Res, 400, "Query parameter 'player_id' must be an integer");
+                return;
+            }
+            Payload["player_id"] = *MaybePlayerID;
+        } else if (Req.has_param("player_name")) {
+            Payload["player_name"] = Req.get_param_value("player_name");
+            Payload["prefix_match"] = GetBoolParam(Req, "prefix_match", true);
+        } else {
+            SetApiError(Res, 400, "Expected query parameter 'player_id' or 'player_name'");
+            return;
+        }
+        const auto Result = ExecuteControlAction("players.vehicle_position", std::move(Payload));
+        if (!Result.value("ok", false)) {
+            SetJson(Res, Result, 400);
+            return;
+        }
+        const auto& Vehicle = Result.at("data").at("vehicle");
+        SetJson(Res, {
+            { "ok", true },
+            { "player", Result.at("data").at("player") },
+            { "vehicle_id", Vehicle.at("vehicle_id") },
+            { "position", Vehicle.contains("position") ? Vehicle.at("position") : json(nullptr) },
+        });
+    }));
+    HttpLibServerInstance.Get("/api/vehicles", Authed([](const httplib::Request& Req, httplib::Response& Res) {
+        HandleControlAction(Res, "vehicles.list_all", {
+            { "include_data", GetBoolParam(Req, "include_data", true) },
+            { "include_position_raw", GetBoolParam(Req, "include_position_raw", true) },
+            { "include_position_parsed", GetBoolParam(Req, "include_position_parsed", false) },
+        });
+    }));
+    HttpLibServerInstance.Get("/api/vehicles/positions", Authed([](const httplib::Request& Req, httplib::Response& Res) {
+        HandleControlAction(Res, "vehicles.position_snapshots", {
+            { "include_parsed", GetBoolParam(Req, "include_parsed", true) },
+        });
+    }));
+    HttpLibServerInstance.Get("/api/settings", Authed([](const httplib::Request&, httplib::Response& Res) {
+        HandleControlAction(Res, "settings.list");
+    }));
+    HttpLibServerInstance.Get("/api/settings/get", Authed([](const httplib::Request& Req, httplib::Response& Res) {
+        if (!Req.has_param("category") || !Req.has_param("key")) {
+            SetApiError(Res, 400, "Expected query parameters 'category' and 'key'");
+            return;
+        }
+        HandleControlAction(Res, "settings.get", {
+            { "category", Req.get_param_value("category") },
+            { "key", Req.get_param_value("key") },
+        });
+    }));
+    HttpLibServerInstance.Get("/api/mods", Authed([](const httplib::Request&, httplib::Response& Res) {
+        HandleControlAction(Res, "resources.mods.list");
+    }));
+
+    HttpLibServerInstance.Post("/api/chat/send", Authed([](const httplib::Request& Req, httplib::Response& Res) {
+        HandleControlAction(Res, "chat.send", ParseJsonBody(Req));
+    }));
+    HttpLibServerInstance.Post("/api/players/kick", Authed([](const httplib::Request& Req, httplib::Response& Res) {
+        HandleControlAction(Res, "players.kick", ParseJsonBody(Req));
+    }));
+    HttpLibServerInstance.Post("/api/players/disconnect", Authed([](const httplib::Request& Req, httplib::Response& Res) {
+        HandleControlAction(Res, "players.disconnect", ParseJsonBody(Req));
+    }));
+    HttpLibServerInstance.Post("/api/settings/set", Authed([](const httplib::Request& Req, httplib::Response& Res) {
+        HandleControlAction(Res, "settings.set", ParseJsonBody(Req));
+    }));
+    HttpLibServerInstance.Post("/api/mods/reload", Authed([](const httplib::Request&, httplib::Response& Res) {
+        HandleControlAction(Res, "resources.mods.reload");
+    }));
+    HttpLibServerInstance.Post("/api/mods/protection", Authed([](const httplib::Request& Req, httplib::Response& Res) {
+        HandleControlAction(Res, "resources.mods.set_protected", ParseJsonBody(Req));
+    }));
+    HttpLibServerInstance.Post("/api/notifications/send", Authed([](const httplib::Request& Req, httplib::Response& Res) {
+        HandleControlAction(Res, "notifications.send", ParseJsonBody(Req));
+    }));
+    HttpLibServerInstance.Post("/api/dialogs/confirmation", Authed([](const httplib::Request& Req, httplib::Response& Res) {
+        HandleControlAction(Res, "dialogs.confirmation", ParseJsonBody(Req));
+    }));
+    HttpLibServerInstance.Post("/api/events/trigger-client", Authed([](const httplib::Request& Req, httplib::Response& Res) {
+        HandleControlAction(Res, "events.trigger_client", ParseJsonBody(Req));
+    }));
+    HttpLibServerInstance.Post("/api/spatial/teleport", Authed([](const httplib::Request& Req, httplib::Response& Res) {
+        HandleControlAction(Res, "spatial.teleport", ParseJsonBody(Req));
+    }));
+    HttpLibServerInstance.Post("/api/spatial/rebase", Authed([](const httplib::Request& Req, httplib::Response& Res) {
+        HandleControlAction(Res, "spatial.rebase", ParseJsonBody(Req));
+    }));
+    HttpLibServerInstance.Post("/api/vehicles/remove", Authed([](const httplib::Request& Req, httplib::Response& Res) {
+        HandleControlAction(Res, "vehicles.remove", ParseJsonBody(Req));
+    }));
+
+    HttpLibServerInstance.set_exception_handler([](const httplib::Request&, httplib::Response& Res, std::exception_ptr Ptr) {
+        try {
+            if (Ptr) {
+                std::rethrow_exception(Ptr);
+            }
+        } catch (const json::exception& e) {
+            SetApiError(Res, 400, e.what());
+            return;
+        } catch (const std::exception& e) {
+            SetApiError(Res, 500, e.what());
+            return;
+        }
+        SetApiError(Res, 500, "Unknown HTTP API error");
     });
-    // magic endpoint
-    HttpLibServerInstance->Get({ 0x2f, 0x6b, 0x69, 0x74, 0x74, 0x79 }, [](const httplib::Request&, httplib::Response& res) {
-        res.set_content(std::string(Magic), "text/plain");
+    HttpLibServerInstance.set_error_handler([](const httplib::Request&, httplib::Response& Res) {
+        if (Res.status == 404) {
+            SetApiError(Res, 404, "Endpoint not found");
+        }
     });
-    HttpLibServerInstance->set_logger([](const httplib::Request& Req, const httplib::Response& Res) {
+    HttpLibServerInstance.set_logger([](const httplib::Request& Req, const httplib::Response& Res) {
         beammp_debug("Http Server: " + Req.method + " " + Req.target + " -> " + std::to_string(Res.status));
     });
+
     Application::SetSubsystemStatus("HTTPServer", Application::Status::Good);
+    beammp_infof("HTTP API listening on {}:{} ({})", mBindAddress, mPort, mAuthToken.empty() ? "loopback-only" : "bearer token required");
+    if (!HttpLibServerInstance.listen(mBindAddress.c_str(), mPort)) {
+        Application::SetSubsystemStatus("HTTPServer", Application::Status::Bad);
+        throw std::runtime_error("Failed to bind/listen on configured HTTP API address");
+    }
 } catch (const std::exception& e) {
-    beammp_error("Failed to start http server. Please ensure the http server is configured properly in the ServerConfig.toml, or turn it off if you don't need it. Error: " + std::string(e.what()));
+    Application::SetSubsystemStatus("HTTPServer", Application::Status::Bad);
+    beammp_error("Failed to start HTTP API server. Check BEAMMP_HTTP_API_* environment overrides if you changed them. Error: " + std::string(e.what()));
 }

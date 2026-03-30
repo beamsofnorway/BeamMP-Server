@@ -21,6 +21,8 @@
 #include <Common.h>
 #include <IThreaded.h>
 #include <filesystem>
+#include <map>
+#include <memory>
 #include <string>
 #include <unordered_map>
 #include <curl/curl.h>
@@ -50,11 +52,20 @@ namespace Server {
     class THttpServerInstance {
     public:
         THttpServerInstance();
+        ~THttpServerInstance();
+
+        THttpServerInstance(const THttpServerInstance&) = delete;
+        THttpServerInstance& operator=(const THttpServerInstance&) = delete;
 
     protected:
         void operator()();
 
     private:
+        bool mEnabled { true };
+        std::string mBindAddress;
+        uint16_t mPort { 0 };
+        std::string mAuthToken;
+        std::shared_ptr<httplib::Server> mServer;
         std::thread mThread;
     };
 }

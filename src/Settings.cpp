@@ -36,6 +36,10 @@ Settings::Settings() {
         { General_Debug, false },
         { General_AllowGuests, true },
         { General_InformationPacket, true },
+        { HttpApi_Enabled, true },
+        { HttpApi_Host, std::string("127.0.0.1") },
+        { HttpApi_Port, 30815 },
+        { HttpApi_Token, std::string("") },
         { Misc_ImScaredOfUpdates, true },
         { Misc_UpdateReminderTime, "30s" }
     };
@@ -56,6 +60,10 @@ Settings::Settings() {
         { { "General", "Debug" }, { General_Debug, READ_WRITE } },
         { { "General", "AllowGuests" }, { General_AllowGuests, READ_WRITE } },
         { { "General", "InformationPacket" }, { General_InformationPacket, READ_WRITE } },
+        { { "HttpApi", "Enabled" }, { HttpApi_Enabled, READ_ONLY } },
+        { { "HttpApi", "Host" }, { HttpApi_Host, READ_ONLY } },
+        { { "HttpApi", "Port" }, { HttpApi_Port, READ_ONLY } },
+        { { "HttpApi", "Token" }, { HttpApi_Token, NO_ACCESS } },
         { { "Misc", "ImScaredOfUpdates" }, { Misc_ImScaredOfUpdates, READ_WRITE } },
         { { "Misc", "UpdateReminderTime" }, { Misc_UpdateReminderTime, READ_WRITE } }
     };

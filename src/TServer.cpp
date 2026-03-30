@@ -263,6 +263,11 @@ void TServer::GlobalParser(const std::weak_ptr<TClient>& Client, std::vector<uin
         auto Futures = LuaAPI::MP::Engine->TriggerEvent("onChatMessage", "", LockedClient->GetID(), LockedClient->GetName(), Message);
         TLuaEngine::WaitForAll(Futures);
         LogChatMessage(LockedClient->GetName(), LockedClient->GetID(), PacketAsString.substr(PacketAsString.find(':', 3) + 1));
+        Application::Console().RecordEvent("chat", "player_message", {
+            { "player_id", LockedClient->GetID() },
+            { "player_name", LockedClient->GetName() },
+            { "message", Message },
+        });
         bool Rejected = std::any_of(Futures.begin(), Futures.end(),
             [](const std::shared_ptr<TLuaResult>& Elem) {
                 return !Elem->Error
@@ -334,6 +339,12 @@ void TServer::HandleEvent(TClient& c, const std::string& RawData) {
         beammp_debugf("Excluded event triggered by client '{}' ({}): '{}', ignoring.", c.GetName(), c.GetID(), Name);
         return;
     }
+    Application::Console().RecordEvent("client", "event", {
+        { "player_id", c.GetID() },
+        { "player_name", c.GetName() },
+        { "event_name", Name },
+        { "data", Data },
+    });
     LuaAPI::MP::Engine->ReportErrors(LuaAPI::MP::Engine->TriggerEvent(Name, "", c.GetID(), Data));
 }
 

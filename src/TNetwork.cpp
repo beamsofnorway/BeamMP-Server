@@ -775,6 +775,11 @@ void TNetwork::OnDisconnect(const std::weak_ptr<TClient>& ClientPtr) {
     }
     beammp_assert(LockedClientPtr != nullptr);
     TClient& c = *LockedClientPtr;
+    Application::Console().RecordEvent("player", "disconnect", {
+        { "player_id", c.GetID() },
+        { "player_name", c.GetName() },
+        { "reason", c.DisconnectReason() },
+    });
     beammp_info(c.GetName() + (" Connection Terminated"));
     std::string Packet;
     TClient::TSetOfVehicleData VehicleData;
@@ -823,6 +828,10 @@ void TNetwork::OnConnect(const std::weak_ptr<TClient>& c) {
     auto LockedClient = c.lock();
     LockedClient->SetID(OpenID());
     beammp_info("Assigned ID " + std::to_string(LockedClient->GetID()) + " to " + LockedClient->GetName());
+    Application::Console().RecordEvent("player", "connect", {
+        { "player_id", LockedClient->GetID() },
+        { "player_name", LockedClient->GetName() },
+    });
     LuaAPI::MP::Engine->ReportErrors(LuaAPI::MP::Engine->TriggerEvent("onPlayerConnecting", "", LockedClient->GetID()));
     SyncResources(*LockedClient);
     if (LockedClient->IsDisconnected())
@@ -1089,6 +1098,10 @@ bool TNetwork::SyncClient(const std::weak_ptr<TClient>& c) {
     }
     LockedClient->SetIsSynced(true);
     beammp_info(LockedClient->GetName() + (" is now synced!"));
+    Application::Console().RecordEvent("player", "synced", {
+        { "player_id", LockedClient->GetID() },
+        { "player_name", LockedClient->GetName() },
+    });
     return true;
 }
 

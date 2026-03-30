@@ -72,6 +72,8 @@ public:
     // Causes all threads to finish up and exit gracefull gracefully
     static void GracefullyShutdown();
     static TConsole& Console() { return mConsole; }
+    static class TControlService& Control() { return *mControlService; }
+    static void SetControl(class TControlService* ControlService) { mControlService = ControlService; }
     static std::string ServerVersionString();
     static const Version& ServerVersion() { return mVersion; }
     static Version ClientMinimumVersion() { return Version { 2, 7, 0 }; }
@@ -124,6 +126,7 @@ private:
     static inline std::mutex mSystemStatusMapMutex {};
     static inline std::string mPPS;
     static inline TConsole mConsole;
+    static inline class TControlService* mControlService { nullptr };
     static inline std::shared_mutex mShutdownMtx {};
     static inline bool mShutdown { false };
     static inline std::mutex mShutdownHandlersMutex {};

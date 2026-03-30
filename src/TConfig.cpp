@@ -62,6 +62,16 @@ static constexpr std::string_view StrInformationPacket = "InformationPacket";
 static constexpr std::string_view EnvStrInformationPacket = "BEAMMP_INFORMATION_PACKET";
 static constexpr std::string_view StrPassword = "Password";
 
+// HttpApi
+static constexpr std::string_view StrHttpApiEnabled = "Enabled";
+static constexpr std::string_view EnvStrHttpApiEnabled = "BEAMMP_HTTP_API_ENABLED";
+static constexpr std::string_view StrHttpApiHost = "Host";
+static constexpr std::string_view EnvStrHttpApiHost = "BEAMMP_HTTP_API_HOST";
+static constexpr std::string_view StrHttpApiPort = "Port";
+static constexpr std::string_view EnvStrHttpApiPort = "BEAMMP_HTTP_API_PORT";
+static constexpr std::string_view StrHttpApiToken = "Token";
+static constexpr std::string_view EnvStrHttpApiToken = "BEAMMP_HTTP_API_TOKEN";
+
 // Misc
 static constexpr std::string_view StrHideUpdateMessages = "ImScaredOfUpdates";
 static constexpr std::string_view EnvStrHideUpdateMessages = "BEAMMP_IM_SCARED_OF_UPDATES";
@@ -153,6 +163,15 @@ void TConfig::FlushToFile() {
     data["General"][StrResourceFolder.data()] = Application::Settings.getAsString(Settings::Key::General_ResourceFolder);
     // data["General"][StrPassword.data()] = Application::Settings.Password;
     // SetComment(data["General"][StrPassword.data()].comments(), " Sets a password on this server, which restricts people from joining. To join, a player must enter this exact password. Leave empty ("") to disable the password.");
+    // HttpApi
+    data["HttpApi"][StrHttpApiEnabled.data()] = Application::Settings.getAsBool(Settings::Key::HttpApi_Enabled);
+    SetComment(data["HttpApi"][StrHttpApiEnabled.data()].comments(), " Whether to enable the built-in HTTP API server");
+    data["HttpApi"][StrHttpApiHost.data()] = Application::Settings.getAsString(Settings::Key::HttpApi_Host);
+    SetComment(data["HttpApi"][StrHttpApiHost.data()].comments(), " The bind address for the HTTP API. Use 127.0.0.1 to keep it local-only by default");
+    data["HttpApi"][StrHttpApiPort.data()] = Application::Settings.getAsInt(Settings::Key::HttpApi_Port);
+    SetComment(data["HttpApi"][StrHttpApiPort.data()].comments(), " The TCP port for the HTTP API");
+    data["HttpApi"][StrHttpApiToken.data()] = Application::Settings.getAsString(Settings::Key::HttpApi_Token);
+    SetComment(data["HttpApi"][StrHttpApiToken.data()].comments(), " Optional bearer token for the HTTP API. Leave empty to allow loopback-only access without a token");
     // Misc
     data["Misc"][StrHideUpdateMessages.data()] = Application::Settings.getAsBool(Settings::Key::Misc_ImScaredOfUpdates);
     SetComment(data["Misc"][StrHideUpdateMessages.data()].comments(), " Hides the periodic update message which notifies you of a new server version. You should really keep this on and always update as soon as possible. For more information visit https://wiki.beammp.com/en/home/server-maintenance#updating-the-server. An update message will always appear at startup regardless.");
@@ -273,6 +292,11 @@ void TConfig::ParseFromFile(std::string_view name) {
         TryReadValue(data, "General", StrAuthKey, EnvStrAuthKey, Settings::Key::General_AuthKey);
         TryReadValue(data, "General", StrLogChat, EnvStrLogChat, Settings::Key::General_LogChat);
         TryReadValue(data, "General", StrAllowGuests, EnvStrAllowGuests, Settings::Key::General_AllowGuests);
+        // HTTP API
+        TryReadValue(data, "HttpApi", StrHttpApiEnabled, EnvStrHttpApiEnabled, Settings::Key::HttpApi_Enabled);
+        TryReadValue(data, "HttpApi", StrHttpApiHost, EnvStrHttpApiHost, Settings::Key::HttpApi_Host);
+        TryReadValue(data, "HttpApi", StrHttpApiPort, EnvStrHttpApiPort, Settings::Key::HttpApi_Port);
+        TryReadValue(data, "HttpApi", StrHttpApiToken, EnvStrHttpApiToken, Settings::Key::HttpApi_Token);
         // Misc
         TryReadValue(data, "Misc", StrHideUpdateMessages, EnvStrHideUpdateMessages, Settings::Key::Misc_ImScaredOfUpdates);
         TryReadValue(data, "Misc", StrUpdateReminderTime, EnvStrUpdateReminderTime, Settings::Key::Misc_UpdateReminderTime);
@@ -323,6 +347,9 @@ void TConfig::PrintDebug() {
     beammp_debug(std::string(StrLogChat) + ": \"" + (Application::Settings.getAsBool(Settings::Key::General_LogChat) ? "true" : "false") + "\"");
     beammp_debug(std::string(StrResourceFolder) + ": \"" + Application::Settings.getAsString(Settings::Key::General_ResourceFolder) + "\"");
     beammp_debug(std::string(StrAllowGuests) + ": \"" + (Application::Settings.getAsBool(Settings::Key::General_AllowGuests) ? "true" : "false") + "\"");
+    beammp_debug(std::string("HttpApi.") + std::string(StrHttpApiEnabled) + ": " + std::string(Application::Settings.getAsBool(Settings::Key::HttpApi_Enabled) ? "true" : "false"));
+    beammp_debug(std::string("HttpApi.") + std::string(StrHttpApiHost) + ": \"" + Application::Settings.getAsString(Settings::Key::HttpApi_Host) + "\"");
+    beammp_debug(std::string("HttpApi.") + std::string(StrHttpApiPort) + ": " + std::to_string(Application::Settings.getAsInt(Settings::Key::HttpApi_Port)));
     // special!
     beammp_debug("Key Length: " + std::to_string(Application::Settings.getAsString(Settings::Key::General_AuthKey).length()) + "");
 }

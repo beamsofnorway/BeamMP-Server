@@ -23,6 +23,7 @@
 #include "Settings.h"
 #include "SignalHandling.h"
 #include "TConfig.h"
+#include "TControlService.h"
 #include "THeartbeatThread.h"
 #include "TLuaEngine.h"
 #include "TNetwork.h"
@@ -196,6 +197,9 @@ int BeamMPServerMain(MainArguments Arguments) {
     Application::Console().InitializeLuaConsole(*LuaEngine);
     LuaEngine->SetNetwork(&Network);
     PPSMonitor.SetNetwork(Network);
+    TControlService ControlService(Server, Network, ResourceManager, *LuaEngine);
+    Application::SetControl(&ControlService);
+    Http::Server::THttpServerInstance HttpServer;
     Application::CheckForUpdates();
 
     TPluginMonitor PluginMonitor(fs::path(Application::Settings.getAsString(Settings::Key::General_ResourceFolder)) / "Server", LuaEngine);
