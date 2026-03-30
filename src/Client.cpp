@@ -78,7 +78,17 @@ std::string TClient::GetCarPositionRaw(int Ident) {
 
 void TClient::Disconnect(std::string_view Reason) {
     beammp_debugf("Disconnecting client {} for reason: {}", GetID(), Reason);
+    {
+        std::unique_lock lock(mDisconnectMutex);
+        mDisconnectRequested = true;
+        if (mDisconnectReason.empty()) {
+            mDisconnectReason = std::string(Reason);
+        }
+    }
+    mTCPWriteCV.notify_all();
+
     boost::system::error_code ec;
+    std::unique_lock lock(mSocketMutex);
     if (mSocket.is_open()) {
         mSocket.shutdown(socket_base::shutdown_both, ec);
         if (ec) {
@@ -143,6 +153,55 @@ TServer& TClient::Server() const {
 void TClient::EnqueuePacket(const std::vector<uint8_t>& Packet) {
     std::unique_lock Lock(mMissedPacketsMutex);
     mPacketsSync.push(Packet);
+}
+
+void TClient::EnqueueTCPWrite(std::vector<uint8_t>&& Packet) {
+    {
+        std::unique_lock lock(mTCPWriteMutex);
+        mPendingTCPWrites.push(std::move(Packet));
+    }
+    mTCPWriteCV.notify_one();
+}
+
+bool TClient::WaitForNextTCPWrite(std::vector<uint8_t>& Packet) {
+    std::unique_lock lock(mTCPWriteMutex);
+    mTCPWriteCV.wait(lock, [&] {
+        return !mPendingTCPWrites.empty() || IsDisconnected();
+    });
+
+    if (mPendingTCPWrites.empty()) {
+        return false;
+    }
+
+    Packet = std::move(mPendingTCPWrites.front());
+    mPendingTCPWrites.pop();
+    return true;
+}
+
+void TClient::ClearPendingTCPWrites() {
+    std::unique_lock lock(mTCPWriteMutex);
+    while (!mPendingTCPWrites.empty()) {
+        mPendingTCPWrites.pop();
+    }
+}
+
+void TClient::RequestDisconnect(std::string_view Reason) {
+    {
+        std::unique_lock lock(mDisconnectMutex);
+        mDisconnectRequested = true;
+        if (mDisconnectReason.empty()) {
+            mDisconnectReason = std::string(Reason);
+        }
+    }
+    mTCPWriteCV.notify_all();
+}
+
+std::string TClient::DisconnectReason() const {
+    std::unique_lock lock(mDisconnectMutex);
+    if (mDisconnectReason.empty()) {
+        return "Disconnect requested";
+    }
+    return mDisconnectReason;
 }
 
 TClient::TClient(TServer& Server, ip::tcp::socket&& Socket)

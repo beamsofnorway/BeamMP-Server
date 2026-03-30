@@ -19,6 +19,7 @@
 #pragma once
 
 #include <chrono>
+#include <condition_variable>
 #include <memory>
 #include <optional>
 #include <queue>
@@ -69,7 +70,7 @@ public:
     void SetUDPAddr(const ip::udp::endpoint& Addr) { mUDPAddress = Addr; }
     void SetTCPSock(ip::tcp::socket&& CSock) { mSocket = std::move(CSock); }
     void Disconnect(std::string_view Reason);
-    bool IsDisconnected() const { return !mSocket.is_open(); }
+    bool IsDisconnected() const { return mDisconnectRequested || !mSocket.is_open(); }
     // locks
     void DeleteCar(int Ident);
     [[nodiscard]] const std::unordered_map<std::string, std::string>& GetIdentifiers() const { return mIdentifiers; }
@@ -98,6 +99,15 @@ public:
     [[nodiscard]] const std::queue<std::vector<uint8_t>>& MissedPacketQueue() const { return mPacketsSync; }
     [[nodiscard]] size_t MissedPacketQueueSize() const { return mPacketsSync.size(); }
     [[nodiscard]] std::mutex& MissedPacketQueueMutex() const { return mMissedPacketsMutex; }
+    [[nodiscard]] std::mutex& SocketMutex() const { return mSocketMutex; }
+    void EnqueueTCPWrite(std::vector<uint8_t>&& Packet);
+    bool WaitForNextTCPWrite(std::vector<uint8_t>& Packet);
+    void ClearPendingTCPWrites();
+    void RequestDisconnect(std::string_view Reason);
+    [[nodiscard]] bool IsDisconnectRequested() const { return mDisconnectRequested; }
+    [[nodiscard]] bool HasTCPWriter() const { return mTCPWriterActive; }
+    void SetTCPWriterActive(bool Active) { mTCPWriterActive = Active; }
+    [[nodiscard]] std::string DisconnectReason() const;
     void SetIsUDPConnected(bool NewIsConnected) { mIsUDPConnected = NewIsConnected; }
     [[nodiscard]] TServer& Server() const;
     void UpdatePingTime();
@@ -112,8 +122,15 @@ private:
     bool mIsUDPConnected = false;
     bool mIsSynced = false;
     bool mIsSyncing = false;
+    bool mDisconnectRequested = false;
+    bool mTCPWriterActive = false;
     mutable std::mutex mMissedPacketsMutex;
+    mutable std::mutex mSocketMutex;
+    mutable std::mutex mTCPWriteMutex;
+    mutable std::mutex mDisconnectMutex;
+    std::condition_variable mTCPWriteCV;
     std::queue<std::vector<uint8_t>> mPacketsSync;
+    std::queue<std::vector<uint8_t>> mPendingTCPWrites;
     std::unordered_map<std::string, std::string> mIdentifiers;
     bool mIsGuest = false;
     mutable std::mutex mVehicleDataMutex;
@@ -128,6 +145,7 @@ private:
     std::string mDID;
     int mID = -1;
     std::chrono::time_point<std::chrono::high_resolution_clock> mLastPingTime = std::chrono::high_resolution_clock::now();
+    std::string mDisconnectReason;
     std::vector<uint8_t> mMagic;
 };
 

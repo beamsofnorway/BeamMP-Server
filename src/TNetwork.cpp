@@ -51,6 +51,18 @@ static void CompressProperly(std::vector<uint8_t>& Data) {
     Data = CombinedData;
 }
 
+namespace {
+bool TCPWriteImmediate(TClient& Client, const void* Data, size_t Size, boost::system::error_code& ec) {
+    std::unique_lock lock(Client.SocketMutex());
+    if (!Client.GetTCPSock().is_open()) {
+        ec = boost::asio::error::operation_aborted;
+        return false;
+    }
+    write(Client.GetTCPSock(), buffer(Data, Size), ec);
+    return !ec;
+}
+}
+
 TNetwork::TNetwork(TServer& Server, TPPSMonitor& PPSMonitor, TResourceManager& ResourceManager)
     : mServer(Server)
     , mPPSMonitor(PPSMonitor)
@@ -511,8 +523,6 @@ bool TNetwork::TCPSend(TClient& c, const std::vector<uint8_t>& Data, bool IsSync
         }
     }
 
-    auto& Sock = c.GetTCPSock();
-
     /*
      * our TCP protocol sends a header of 4 bytes, followed by the data.
      *
@@ -526,14 +536,24 @@ bool TNetwork::TCPSend(TClient& c, const std::vector<uint8_t>& Data, bool IsSync
     ToSend.resize(Data.size() + sizeof(Size));
     std::memcpy(ToSend.data(), &Size, sizeof(Size));
     std::memcpy(ToSend.data() + sizeof(Size), Data.data(), Data.size());
-    boost::system::error_code ec;
-    write(Sock, buffer(ToSend), ec);
-    if (ec) {
-        beammp_debugf("write(): {}", ec.message());
-        c.Disconnect("write() failed");
+
+    if (c.IsDisconnected()) {
         return false;
     }
-    c.UpdatePingTime();
+
+    if (!c.HasTCPWriter()) {
+        boost::system::error_code ec;
+        TCPWriteImmediate(c, ToSend.data(), ToSend.size(), ec);
+        if (ec) {
+            beammp_debugf("write(): {}", ec.message());
+            c.Disconnect("write() failed");
+            return false;
+        }
+        c.UpdatePingTime();
+        return true;
+    }
+
+    c.EnqueueTCPWrite(std::move(ToSend));
     return true;
 }
 
@@ -544,11 +564,9 @@ std::vector<uint8_t> TNetwork::TCPRcv(TClient& c) {
     }
 
     int32_t Header {};
-    auto& Sock = c.GetTCPSock();
-
     boost::system::error_code ec;
     std::array<uint8_t, sizeof(Header)> HeaderData;
-    read(Sock, buffer(HeaderData), ec);
+    read(c.GetTCPSock(), buffer(HeaderData), ec);
     if (ec) {
         // TODO: handle this case (read failed)
         beammp_debugf("TCPRcv: Reading header failed: {}", ec.message());
@@ -571,7 +589,7 @@ std::vector<uint8_t> TNetwork::TCPRcv(TClient& c) {
         beammp_warn("Client " + c.GetName() + " (" + std::to_string(c.GetID()) + ") sent header of >100MB - assuming malicious intent and disconnecting the client.");
         return {};
     }
-    auto N = read(Sock, buffer(Data), ec);
+    auto N = read(c.GetTCPSock(), buffer(Data), ec);
     if (ec) {
         // TODO: handle this case properly
         beammp_debugf("TCPRcv: Reading data failed: {}", ec.message());
@@ -606,7 +624,39 @@ void TNetwork::ClientKick(TClient& c, const std::string& R) {
     if (!TCPSend(c, StringToVector("K" + R))) {
         beammp_debugf("tried to kick player '{}' (id {}), but was already disconnected", c.GetName(), c.GetID());
     }
-    c.Disconnect("Kicked");
+    if (c.HasTCPWriter()) {
+        c.RequestDisconnect("Kicked");
+    } else {
+        c.Disconnect("Kicked");
+    }
+}
+
+void TNetwork::TCPWriter(const std::weak_ptr<TClient>& c) {
+    RegisterThreadAuto();
+    while (!c.expired()) {
+        auto Client = c.lock();
+        std::vector<uint8_t> Data;
+        if (!Client->WaitForNextTCPWrite(Data)) {
+            break;
+        }
+
+        boost::system::error_code ec;
+        TCPWriteImmediate(*Client, Data.data(), Data.size(), ec);
+        if (ec) {
+            beammp_debugf("write(): {}", ec.message());
+            Client->ClearPendingTCPWrites();
+            Client->Disconnect("write() failed");
+            break;
+        }
+        Client->UpdatePingTime();
+    }
+
+    if (!c.expired()) {
+        auto Client = c.lock();
+        if (Client->IsDisconnectRequested() && Client->GetTCPSock().is_open()) {
+            Client->Disconnect(Client->DisconnectReason());
+        }
+    }
 }
 
 void TNetwork::Looper(const std::weak_ptr<TClient>& c) {
@@ -651,6 +701,9 @@ void TNetwork::TCPClient(const std::weak_ptr<TClient>& c) {
         mServer.RemoveClient(c);
         return;
     }
+    c.lock()->SetTCPWriterActive(true);
+    std::thread Writer(&TNetwork::TCPWriter, this, c);
+
     OnConnect(c);
     RegisterThread("(" + std::to_string(c.lock()->GetID()) + ") \"" + c.lock()->GetName() + "\"");
 
@@ -682,6 +735,12 @@ void TNetwork::TCPClient(const std::weak_ptr<TClient>& c) {
 
     if (QueueSync.joinable())
         QueueSync.join();
+    if (Writer.joinable())
+        Writer.join();
+
+    if (!c.expired()) {
+        c.lock()->SetTCPWriterActive(false);
+    }
 
     if (!c.expired()) {
         auto Client = c.lock();
@@ -882,18 +941,23 @@ void TNetwork::SendFileToClient(TClient& c, size_t Size, const std::string& Name
         beammp_errorf("Failed to open mod '{}' for sending, error: {}", Name, std::strerror(errno));
         return;
     }
-    // native handle, needed in order to make native syscalls with it
-    int socket = c.GetTCPSock().native_handle();
-
     ssize_t ret = 0;
     auto ToSendTotal = Size;
     auto Start = 0;
-    while (ret < ssize_t(ToSendTotal)) {
-        auto SysOffset = off_t(Start + size_t(ret));
-        ret = sendfile(socket, fd, &SysOffset, ToSendTotal - size_t(ret));
-        if (ret < 0) {
-            beammp_errorf("Failed to send mod '{}' to client {}: {}", Name, c.GetID(), std::strerror(errno));
+    {
+        std::unique_lock lock(c.SocketMutex());
+        if (!c.GetTCPSock().is_open()) {
             return;
+        }
+        // native handle, needed in order to make native syscalls with it
+        int socket = c.GetTCPSock().native_handle();
+        while (ret < ssize_t(ToSendTotal)) {
+            auto SysOffset = off_t(Start + size_t(ret));
+            ret = sendfile(socket, fd, &SysOffset, ToSendTotal - size_t(ret));
+            if (ret < 0) {
+                beammp_errorf("Failed to send mod '{}' to client {}: {}", Name, c.GetID(), std::strerror(errno));
+                return;
+            }
         }
     }
 
@@ -933,13 +997,23 @@ void TNetwork::SendFileToClient(TClient& c, size_t Size, const std::string& Name
 }
 
 bool TNetwork::TCPSendRaw(TClient& C, ip::tcp::socket& socket, const uint8_t* Data, size_t Size) {
-    boost::system::error_code ec;
-    write(socket, buffer(Data, Size), ec);
-    if (ec) {
-        beammp_errorf("Failed to send raw data to client: {}", ec.message());
+    (void)socket;
+    if (C.IsDisconnected()) {
         return false;
     }
-    C.UpdatePingTime();
+
+    if (!C.HasTCPWriter()) {
+        boost::system::error_code ec;
+        TCPWriteImmediate(C, Data, Size, ec);
+        if (ec) {
+            beammp_errorf("Failed to send raw data to client: {}", ec.message());
+            return false;
+        }
+        C.UpdatePingTime();
+        return true;
+    }
+
+    C.EnqueueTCPWrite(std::vector<uint8_t>(Data, Data + Size));
     return true;
 }
 
