@@ -38,6 +38,7 @@ set(PRJ_HEADERS
     include/SignalHandling.h
     include/TConfig.h
     include/TConsole.h
+    include/TControlService.h
     include/THeartbeatThread.h
     include/TLuaEngine.h
     include/TLuaPlugin.h
@@ -64,6 +65,7 @@ set(PRJ_SOURCES
     src/SignalHandling.cpp
     src/TConfig.cpp
     src/TConsole.cpp
+    src/TControlService.cpp
     src/THeartbeatThread.cpp
     src/TLuaEngine.cpp
     src/TLuaPlugin.cpp
