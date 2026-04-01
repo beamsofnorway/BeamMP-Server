@@ -706,6 +706,10 @@ void TNetwork::DisconnectClient(const std::weak_ptr<TClient>& c, const std::stri
 }
 
 void TNetwork::DisconnectClient(TClient& c, const std::string& R) {
+    if (!c.GetTCPSock().is_open()) {
+        return;
+    }
+
     boost::system::error_code ec;
     const auto endpoint = c.GetTCPSock().remote_endpoint(ec);
     if (!ec) {
