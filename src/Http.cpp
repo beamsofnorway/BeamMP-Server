@@ -370,6 +370,8 @@ json DescribeHttpApi(bool TokenConfigured, const std::string& BindAddress, uint1
                     "/api/events/trigger-client",
                     "/api/spatial/teleport",
                     "/api/spatial/rebase",
+                    "/api/spatial/offset",
+                    "/api/spatial/teleport-applied",
                     "/api/vehicles/remove",
                 }) },
           } },
@@ -747,6 +749,34 @@ void Http::Server::THttpServerInstance::operator()() try {
     HttpLibServerInstance.Get("/api/mods", Authed([](const httplib::Request&, httplib::Response& Res) {
         HandleControlAction(Res, "resources.mods.list");
     }));
+    HttpLibServerInstance.Get("/api/spatial/offset", Authed([](const httplib::Request& Req, httplib::Response& Res) {
+        json Payload;
+        if (Req.has_param("player_id")) {
+            const auto MaybePlayerID = GetIntParam(Req, "player_id");
+            if (!MaybePlayerID.has_value()) {
+                SetApiError(Res, 400, "Query parameter 'player_id' must be an integer");
+                return;
+            }
+            Payload["player_id"] = *MaybePlayerID;
+        } else if (Req.has_param("id")) {
+            const auto MaybeID = GetIntParam(Req, "id");
+            if (!MaybeID.has_value()) {
+                SetApiError(Res, 400, "Query parameter 'id' must be an integer");
+                return;
+            }
+            Payload["id"] = *MaybeID;
+        } else if (Req.has_param("player_name")) {
+            Payload["player_name"] = Req.get_param_value("player_name");
+            Payload["prefix_match"] = GetBoolParam(Req, "prefix_match", true);
+        } else if (Req.has_param("name")) {
+            Payload["name"] = Req.get_param_value("name");
+            Payload["prefix_match"] = GetBoolParam(Req, "prefix_match", true);
+        } else {
+            SetApiError(Res, 400, "Expected query parameter 'player_id', 'id', 'player_name', or 'name'");
+            return;
+        }
+        HandleControlAction(Res, "spatial.offset.get", std::move(Payload));
+    }));
 
     HttpLibServerInstance.Post("/api/chat/send", Authed([](const httplib::Request& Req, httplib::Response& Res) {
         HandleControlAction(Res, "chat.send", ParseJsonBody(Req));
@@ -780,6 +810,12 @@ void Http::Server::THttpServerInstance::operator()() try {
     }));
     HttpLibServerInstance.Post("/api/spatial/rebase", Authed([](const httplib::Request& Req, httplib::Response& Res) {
         HandleControlAction(Res, "spatial.rebase", ParseJsonBody(Req));
+    }));
+    HttpLibServerInstance.Post("/api/spatial/offset", Authed([](const httplib::Request& Req, httplib::Response& Res) {
+        HandleControlAction(Res, "spatial.offset.set", ParseJsonBody(Req));
+    }));
+    HttpLibServerInstance.Post("/api/spatial/teleport-applied", Authed([](const httplib::Request& Req, httplib::Response& Res) {
+        HandleControlAction(Res, "spatial.teleport_applied", ParseJsonBody(Req));
     }));
     HttpLibServerInstance.Post("/api/vehicles/remove", Authed([](const httplib::Request& Req, httplib::Response& Res) {
         HandleControlAction(Res, "vehicles.remove", ParseJsonBody(Req));

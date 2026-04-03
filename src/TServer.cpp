@@ -38,6 +38,101 @@
 
 #include "Json.h"
 
+namespace {
+using json = nlohmann::json;
+using SpatialOffset = TClient::TSpatialOffset;
+
+json PlayerEventSnapshot(TClient& Client) {
+    return {
+        { "id", Client.GetID() },
+        { "name", Client.GetName() },
+    };
+}
+
+std::optional<SpatialOffset> ParseSpatialOffsetFromJson(const json& Payload) {
+    if (Payload.contains("offset") && Payload.at("offset").is_array() && Payload.at("offset").size() >= 3) {
+        return SpatialOffset {
+            Payload.at("offset").at(0).get<double>(),
+            Payload.at("offset").at(1).get<double>(),
+            Payload.at("offset").at(2).get<double>(),
+        };
+    }
+
+    if (Payload.contains("offset") && Payload.at("offset").is_object()) {
+        const auto& Offset = Payload.at("offset");
+        if (Offset.contains("x") && Offset.contains("y") && Offset.contains("z")) {
+            return SpatialOffset {
+                Offset.at("x").get<double>(),
+                Offset.at("y").get<double>(),
+                Offset.at("z").get<double>(),
+            };
+        }
+    }
+
+    if (Payload.contains("x") && Payload.contains("y") && Payload.contains("z")) {
+        return SpatialOffset {
+            Payload.at("x").get<double>(),
+            Payload.at("y").get<double>(),
+            Payload.at("z").get<double>(),
+        };
+    }
+
+    return std::nullopt;
+}
+
+json SerializeSpatialOffset(const SpatialOffset& Offset) {
+    return {
+        { "x", Offset[0] },
+        { "y", Offset[1] },
+        { "z", Offset[2] },
+    };
+}
+
+bool HandleSpatialAppliedClientEvent(TClient& Client, const std::string& Name, const std::string& Data) {
+    if (Name != "BeamMPSpatialTeleportApplied" && Name != "BeamMPSpatialRebaseApplied") {
+        return false;
+    }
+
+    auto Payload = json::parse(Data, nullptr, false);
+    if (Payload.is_discarded() || !Payload.is_object()) {
+        beammp_warnf("Client '{}' ({}) sent invalid spatial applied payload for '{}': {}", Client.GetName(), Client.GetID(), Name, Data);
+        return true;
+    }
+
+    const auto MaybeOffset = ParseSpatialOffsetFromJson(Payload);
+    if (!MaybeOffset.has_value()) {
+        beammp_warnf("Client '{}' ({}) sent spatial applied event '{}' without a valid offset", Client.GetName(), Client.GetID(), Name);
+        return true;
+    }
+
+    Client.SetSpatialOffset(*MaybeOffset);
+
+    json EventPayload {
+        { "player", PlayerEventSnapshot(Client) },
+        { "offset", SerializeSpatialOffset(*MaybeOffset) },
+        { "event_name", Name },
+    };
+    if (Payload.contains("request_id")) {
+        EventPayload["request_id"] = Payload.at("request_id");
+    }
+    if (Payload.contains("reason")) {
+        EventPayload["reason"] = Payload.at("reason");
+    }
+    if (Payload.contains("position")) {
+        EventPayload["position"] = Payload.at("position");
+    }
+    if (Payload.contains("teleport")) {
+        EventPayload["teleport"] = Payload.at("teleport");
+    }
+    if (Payload.contains("meta")) {
+        EventPayload["meta"] = Payload.at("meta");
+    }
+
+    Application::Console().RecordEvent("spatial", Name == "BeamMPSpatialTeleportApplied" ? "teleport_applied" : "rebase_applied", std::move(EventPayload));
+    return true;
+}
+}
+
 static std::optional<std::pair<int, int>> GetPidVid(const std::string& str) {
     auto IDSep = str.find('-');
     std::string pid = str.substr(0, IDSep);
@@ -330,6 +425,10 @@ void TServer::HandleEvent(TClient& c, const std::string& RawData) {
     }
     std::string Name = RawData.substr(2, NameDataSep - 2);
     std::string Data = RawData.substr(NameDataSep + 1);
+
+    if (HandleSpatialAppliedClientEvent(c, Name, Data)) {
+        return;
+    }
 
     std::vector<std::string> exclude = {"onInit", "onFileChanged","onVehicleDeleted","onConsoleInput","onPlayerAuth","postPlayerAuth", "onPlayerDisconnect",
     "onPlayerConnecting","onPlayerJoining","onPlayerJoin","onChatMessage","postChatMessage","onVehicleSpawn","postVehicleSpawn","onVehicleEdited", "postVehicleEdited",

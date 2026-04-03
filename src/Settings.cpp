@@ -18,6 +18,8 @@
 
 #include "Settings.h"
 
+#include <charconv>
+
 Settings::Settings() {
     SettingsMap = std::unordered_map<Key, SettingsTypeVariant> {
         // All entries which contain std::strings must be explicitly constructed, otherwise they become 'bool'
@@ -40,6 +42,9 @@ Settings::Settings() {
         { HttpApi_Host, std::string("127.0.0.1") },
         { HttpApi_Port, 30815 },
         { HttpApi_Token, std::string("") },
+        { SpatialRebase_AutoSafeLimitMeters, 48 },
+        { SpatialRebase_AutoRetriggerBandMeters, 8 },
+        { SpatialRebase_AutoCooldownMs, 1000 },
         { Misc_ImScaredOfUpdates, true },
         { Misc_UpdateReminderTime, "30s" }
     };
@@ -64,6 +69,9 @@ Settings::Settings() {
         { { "HttpApi", "Host" }, { HttpApi_Host, READ_ONLY } },
         { { "HttpApi", "Port" }, { HttpApi_Port, READ_ONLY } },
         { { "HttpApi", "Token" }, { HttpApi_Token, NO_ACCESS } },
+        { { "SpatialRebase", "AutoSafeLimitMeters" }, { SpatialRebase_AutoSafeLimitMeters, READ_WRITE } },
+        { { "SpatialRebase", "AutoRetriggerBandMeters" }, { SpatialRebase_AutoRetriggerBandMeters, READ_WRITE } },
+        { { "SpatialRebase", "AutoCooldownMs" }, { SpatialRebase_AutoCooldownMs, READ_WRITE } },
         { { "Misc", "ImScaredOfUpdates" }, { Misc_ImScaredOfUpdates, READ_WRITE } },
         { { "Misc", "UpdateReminderTime" }, { Misc_UpdateReminderTime, READ_WRITE } }
     };
@@ -180,6 +188,51 @@ void Settings::setConsoleInputAccessMapping(const ComposedKey& keyName, bool val
     }
 
     map->at(key) = value;
+}
+
+bool Settings::setByKeyString(const ComposedKey& keyName, const std::string& value, std::string& error) {
+    auto [map, acl_map] = boost::synchronize(SettingsMap, InputAccessMapping);
+    if (!acl_map->contains(keyName)) {
+        error = "Unknown setting '" + keyName.Category + "." + keyName.Key + "'";
+        return false;
+    }
+
+    const Key key = acl_map->at(keyName).first;
+    auto& Slot = map->at(key);
+
+    if (std::holds_alternative<std::string>(Slot)) {
+        Slot = value;
+        return true;
+    }
+
+    if (std::holds_alternative<int>(Slot)) {
+        int Parsed = 0;
+        const auto* Begin = value.data();
+        const auto* End = value.data() + value.size();
+        const auto Result = std::from_chars(Begin, End, Parsed);
+        if (Result.ec != std::errc() || Result.ptr != End) {
+            error = "Expected integer for setting '" + keyName.Category + "." + keyName.Key + "'";
+            return false;
+        }
+        Slot = Parsed;
+        return true;
+    }
+
+    if (std::holds_alternative<bool>(Slot)) {
+        if (value == "true" || value == "1") {
+            Slot = true;
+            return true;
+        }
+        if (value == "false" || value == "0") {
+            Slot = false;
+            return true;
+        }
+        error = "Expected boolean for setting '" + keyName.Category + "." + keyName.Key + "'";
+        return false;
+    }
+
+    error = "Unsupported setting type for '" + keyName.Category + "." + keyName.Key + "'";
+    return false;
 }
 
 TEST_CASE("settings get/set") {

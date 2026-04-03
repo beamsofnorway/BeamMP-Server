@@ -76,6 +76,44 @@ std::string TClient::GetCarPositionRaw(int Ident) {
     }
 }
 
+void TClient::SetSpatialOffset(const TSpatialOffset& Offset) {
+    std::unique_lock lock(mSpatialOffsetMutex);
+    mSpatialOffset = Offset;
+    mPendingSpatialRebase.reset();
+}
+
+TClient::TSpatialOffset TClient::GetSpatialOffset() const {
+    std::unique_lock lock(mSpatialOffsetMutex);
+    return mSpatialOffset;
+}
+
+bool TClient::TryBeginPendingSpatialRebase(const TSpatialOffset& Offset, const TAutoRebaseThresholdBias& ThresholdBias, std::chrono::milliseconds Cooldown) {
+    std::unique_lock lock(mSpatialOffsetMutex);
+    if (mPendingSpatialRebase.has_value()) {
+        return false;
+    }
+
+    const auto Now = std::chrono::steady_clock::now();
+    if (mLastAutomaticSpatialRebaseAt.time_since_epoch().count() != 0 && Now - mLastAutomaticSpatialRebaseAt < Cooldown) {
+        return false;
+    }
+
+    mPendingSpatialRebase = Offset;
+    mAutoRebaseThresholdBias = ThresholdBias;
+    mLastAutomaticSpatialRebaseAt = Now;
+    return true;
+}
+
+void TClient::ClearPendingSpatialRebase() {
+    std::unique_lock lock(mSpatialOffsetMutex);
+    mPendingSpatialRebase.reset();
+}
+
+TClient::TAutoRebaseThresholdBias TClient::GetAutoRebaseThresholdBias() const {
+    std::unique_lock lock(mSpatialOffsetMutex);
+    return mAutoRebaseThresholdBias;
+}
+
 void TClient::Disconnect(std::string_view Reason) {
     beammp_debugf("Disconnecting client {} for reason: {}", GetID(), Reason);
     {

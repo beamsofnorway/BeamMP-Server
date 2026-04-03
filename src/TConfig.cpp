@@ -72,6 +72,14 @@ static constexpr std::string_view EnvStrHttpApiPort = "BEAMMP_HTTP_API_PORT";
 static constexpr std::string_view StrHttpApiToken = "Token";
 static constexpr std::string_view EnvStrHttpApiToken = "BEAMMP_HTTP_API_TOKEN";
 
+// SpatialRebase
+static constexpr std::string_view StrSpatialRebaseAutoSafeLimitMeters = "AutoSafeLimitMeters";
+static constexpr std::string_view EnvStrSpatialRebaseAutoSafeLimitMeters = "BEAMMP_SPATIAL_REBASE_AUTO_SAFE_LIMIT_METERS";
+static constexpr std::string_view StrSpatialRebaseAutoRetriggerBandMeters = "AutoRetriggerBandMeters";
+static constexpr std::string_view EnvStrSpatialRebaseAutoRetriggerBandMeters = "BEAMMP_SPATIAL_REBASE_AUTO_RETRIGGER_BAND_METERS";
+static constexpr std::string_view StrSpatialRebaseAutoCooldownMs = "AutoCooldownMs";
+static constexpr std::string_view EnvStrSpatialRebaseAutoCooldownMs = "BEAMMP_SPATIAL_REBASE_AUTO_COOLDOWN_MS";
+
 // Misc
 static constexpr std::string_view StrHideUpdateMessages = "ImScaredOfUpdates";
 static constexpr std::string_view EnvStrHideUpdateMessages = "BEAMMP_IM_SCARED_OF_UPDATES";
@@ -100,6 +108,7 @@ TEST_CASE("TConfig::TConfig") {
 
     const auto table = toml::parse(CfgFile);
     CHECK(table.at("General").is_table());
+    CHECK(table.at("SpatialRebase").is_table());
     CHECK(table.at("Misc").is_table());
 
     fs::remove(CfgFile);
@@ -172,6 +181,13 @@ void TConfig::FlushToFile() {
     SetComment(data["HttpApi"][StrHttpApiPort.data()].comments(), " The TCP port for the HTTP API");
     data["HttpApi"][StrHttpApiToken.data()] = Application::Settings.getAsString(Settings::Key::HttpApi_Token);
     SetComment(data["HttpApi"][StrHttpApiToken.data()].comments(), " Optional bearer token for the HTTP API. Leave empty to allow loopback-only access without a token");
+    // SpatialRebase
+    data["SpatialRebase"][StrSpatialRebaseAutoSafeLimitMeters.data()] = Application::Settings.getAsInt(Settings::Key::SpatialRebase_AutoSafeLimitMeters);
+    SetComment(data["SpatialRebase"][StrSpatialRebaseAutoSafeLimitMeters.data()].comments(), " Auto-rebase trigger limit on each horizontal axis in local meters. Wrap width is derived as this value times two");
+    data["SpatialRebase"][StrSpatialRebaseAutoRetriggerBandMeters.data()] = Application::Settings.getAsInt(Settings::Key::SpatialRebase_AutoRetriggerBandMeters);
+    SetComment(data["SpatialRebase"][StrSpatialRebaseAutoRetriggerBandMeters.data()].comments(), " Extra one-sided hysteresis distance before the opposite-direction auto-rebase can retrigger after a wrap");
+    data["SpatialRebase"][StrSpatialRebaseAutoCooldownMs.data()] = Application::Settings.getAsInt(Settings::Key::SpatialRebase_AutoCooldownMs);
+    SetComment(data["SpatialRebase"][StrSpatialRebaseAutoCooldownMs.data()].comments(), " Minimum milliseconds between automatic rebase requests for one player");
     // Misc
     data["Misc"][StrHideUpdateMessages.data()] = Application::Settings.getAsBool(Settings::Key::Misc_ImScaredOfUpdates);
     SetComment(data["Misc"][StrHideUpdateMessages.data()].comments(), " Hides the periodic update message which notifies you of a new server version. You should really keep this on and always update as soon as possible. For more information visit https://wiki.beammp.com/en/home/server-maintenance#updating-the-server. An update message will always appear at startup regardless.");
@@ -233,6 +249,10 @@ void TConfig::TryReadValue(toml::value& Table, const std::string& Category, cons
                 Application::Settings.get(key));
             return;
         }
+    }
+
+    if (mDisableConfig) {
+        return;
     }
 
     std::visit([&Table, &Category, &Key, &key](auto&& arg) {
@@ -297,6 +317,10 @@ void TConfig::ParseFromFile(std::string_view name) {
         TryReadValue(data, "HttpApi", StrHttpApiHost, EnvStrHttpApiHost, Settings::Key::HttpApi_Host);
         TryReadValue(data, "HttpApi", StrHttpApiPort, EnvStrHttpApiPort, Settings::Key::HttpApi_Port);
         TryReadValue(data, "HttpApi", StrHttpApiToken, EnvStrHttpApiToken, Settings::Key::HttpApi_Token);
+        // SPATIAL REBASE
+        TryReadValue(data, "SpatialRebase", StrSpatialRebaseAutoSafeLimitMeters, EnvStrSpatialRebaseAutoSafeLimitMeters, Settings::Key::SpatialRebase_AutoSafeLimitMeters);
+        TryReadValue(data, "SpatialRebase", StrSpatialRebaseAutoRetriggerBandMeters, EnvStrSpatialRebaseAutoRetriggerBandMeters, Settings::Key::SpatialRebase_AutoRetriggerBandMeters);
+        TryReadValue(data, "SpatialRebase", StrSpatialRebaseAutoCooldownMs, EnvStrSpatialRebaseAutoCooldownMs, Settings::Key::SpatialRebase_AutoCooldownMs);
         // Misc
         TryReadValue(data, "Misc", StrHideUpdateMessages, EnvStrHideUpdateMessages, Settings::Key::Misc_ImScaredOfUpdates);
         TryReadValue(data, "Misc", StrUpdateReminderTime, EnvStrUpdateReminderTime, Settings::Key::Misc_UpdateReminderTime);
@@ -350,6 +374,9 @@ void TConfig::PrintDebug() {
     beammp_debug(std::string("HttpApi.") + std::string(StrHttpApiEnabled) + ": " + std::string(Application::Settings.getAsBool(Settings::Key::HttpApi_Enabled) ? "true" : "false"));
     beammp_debug(std::string("HttpApi.") + std::string(StrHttpApiHost) + ": \"" + Application::Settings.getAsString(Settings::Key::HttpApi_Host) + "\"");
     beammp_debug(std::string("HttpApi.") + std::string(StrHttpApiPort) + ": " + std::to_string(Application::Settings.getAsInt(Settings::Key::HttpApi_Port)));
+    beammp_debug(std::string("SpatialRebase.") + std::string(StrSpatialRebaseAutoSafeLimitMeters) + ": " + std::to_string(Application::Settings.getAsInt(Settings::Key::SpatialRebase_AutoSafeLimitMeters)));
+    beammp_debug(std::string("SpatialRebase.") + std::string(StrSpatialRebaseAutoRetriggerBandMeters) + ": " + std::to_string(Application::Settings.getAsInt(Settings::Key::SpatialRebase_AutoRetriggerBandMeters)));
+    beammp_debug(std::string("SpatialRebase.") + std::string(StrSpatialRebaseAutoCooldownMs) + ": " + std::to_string(Application::Settings.getAsInt(Settings::Key::SpatialRebase_AutoCooldownMs)));
     // special!
     beammp_debug("Key Length: " + std::to_string(Application::Settings.getAsString(Settings::Key::General_AuthKey).length()) + "");
 }

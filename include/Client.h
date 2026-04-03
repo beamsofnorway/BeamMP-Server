@@ -18,6 +18,7 @@
 
 #pragma once
 
+#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <memory>
@@ -47,6 +48,8 @@ struct TConnection final {
 class TClient final {
 public:
     using TSetOfVehicleData = std::vector<TVehicleData>;
+    using TSpatialOffset = std::array<double, 3>;
+    using TAutoRebaseThresholdBias = std::array<int, 3>;
 
     struct TVehicleDataLockPair {
         TSetOfVehicleData* VehicleData;
@@ -67,6 +70,11 @@ public:
     void SetIdentifier(const std::string& key, const std::string& value) { mIdentifiers[key] = value; }
     nlohmann::json GetCarData(int Ident);
     std::string GetCarPositionRaw(int Ident);
+    void SetSpatialOffset(const TSpatialOffset& Offset);
+    [[nodiscard]] TSpatialOffset GetSpatialOffset() const;
+    [[nodiscard]] bool TryBeginPendingSpatialRebase(const TSpatialOffset& Offset, const TAutoRebaseThresholdBias& ThresholdBias, std::chrono::milliseconds Cooldown);
+    void ClearPendingSpatialRebase();
+    [[nodiscard]] TAutoRebaseThresholdBias GetAutoRebaseThresholdBias() const;
     void SetUDPAddr(const ip::udp::endpoint& Addr) { mUDPAddress = Addr; }
     void SetTCPSock(ip::tcp::socket&& CSock) { mSocket = std::move(CSock); }
     void Disconnect(std::string_view Reason);
@@ -135,8 +143,13 @@ private:
     bool mIsGuest = false;
     mutable std::mutex mVehicleDataMutex;
     mutable std::mutex mVehiclePositionMutex;
+    mutable std::mutex mSpatialOffsetMutex;
     TSetOfVehicleData mVehicleData;
     SparseArray<std::string> mVehiclePosition;
+    TSpatialOffset mSpatialOffset { 0.0, 0.0, 0.0 };
+    std::optional<TSpatialOffset> mPendingSpatialRebase;
+    TAutoRebaseThresholdBias mAutoRebaseThresholdBias { 0, 0, 0 };
+    std::chrono::steady_clock::time_point mLastAutomaticSpatialRebaseAt {};
     std::string mName = "Unknown Client";
     ip::tcp::socket mSocket;
     ip::udp::endpoint mUDPAddress {};

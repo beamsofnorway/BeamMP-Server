@@ -93,6 +93,11 @@ struct Settings {
         HttpApi_Host,
         HttpApi_Port,
         HttpApi_Token,
+
+        // [SpatialRebase]
+        SpatialRebase_AutoSafeLimitMeters,
+        SpatialRebase_AutoRetriggerBandMeters,
+        SpatialRebase_AutoCooldownMs,
     };
 
     Sync<std::unordered_map<Key, SettingsTypeVariant>> SettingsMap;
@@ -147,4 +152,5 @@ struct Settings {
     void setConsoleInputAccessMapping(const ComposedKey& keyName, const std::string& value);
     void setConsoleInputAccessMapping(const ComposedKey& keyName, int value);
     void setConsoleInputAccessMapping(const ComposedKey& keyName, bool value);
+    bool setByKeyString(const ComposedKey& keyName, const std::string& value, std::string& error);
 };

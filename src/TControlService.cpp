@@ -43,6 +43,45 @@ std::string Lower(std::string Value) {
     });
     return Value;
 }
+
+std::optional<TClient::TSpatialOffset> ParseSpatialOffset(const json& Payload) {
+    if (Payload.contains("offset") && Payload.at("offset").is_array() && Payload.at("offset").size() >= 3) {
+        return TClient::TSpatialOffset {
+            Payload.at("offset").at(0).get<double>(),
+            Payload.at("offset").at(1).get<double>(),
+            Payload.at("offset").at(2).get<double>(),
+        };
+    }
+
+    if (Payload.contains("offset") && Payload.at("offset").is_object()) {
+        const auto& Offset = Payload.at("offset");
+        if (Offset.contains("x") && Offset.contains("y") && Offset.contains("z")) {
+            return TClient::TSpatialOffset {
+                Offset.at("x").get<double>(),
+                Offset.at("y").get<double>(),
+                Offset.at("z").get<double>(),
+            };
+        }
+    }
+
+    if (Payload.contains("x") && Payload.contains("y") && Payload.contains("z")) {
+        return TClient::TSpatialOffset {
+            Payload.at("x").get<double>(),
+            Payload.at("y").get<double>(),
+            Payload.at("z").get<double>(),
+        };
+    }
+
+    return std::nullopt;
+}
+
+json SerializeSpatialOffset(const TClient::TSpatialOffset& Offset) {
+    return {
+        { "x", Offset[0] },
+        { "y", Offset[1] },
+        { "z", Offset[2] },
+    };
+}
 }
 
 TControlService::TControlService(TServer& Server, TNetwork& Network, TResourceManager& ResourceManager, TLuaEngine& LuaEngine)
@@ -173,6 +212,15 @@ json TControlService::Dispatch(const std::string& Action, const json& Payload) {
     if (Action == "spatial.rebase") {
         return SpatialRebase(Payload);
     }
+    if (Action == "spatial.offset.get") {
+        return SpatialOffsetGet(Payload);
+    }
+    if (Action == "spatial.offset.set") {
+        return SpatialOffsetSet(Payload);
+    }
+    if (Action == "spatial.teleport_applied") {
+        return SpatialTeleportApplied(Payload);
+    }
     if (Action == "vehicles.remove") {
         return RemoveVehicle(Payload);
     }
@@ -226,6 +274,9 @@ json TControlService::DescribeActions() const {
         { { "action", "events.trigger_client" }, { "description", "Triggers a client event globally or for one player" }, { "params", json::array({ "target_id", "event_name", "data" }) } },
         { { "action", "spatial.teleport" }, { "description", "Sends a teleport-oriented client event hook" }, { "params", json::array({ "target_id", "data", "event_name" }) } },
         { { "action", "spatial.rebase" }, { "description", "Sends a rebase-oriented client event hook" }, { "params", json::array({ "target_id", "data", "event_name" }) } },
+        { { "action", "spatial.offset.get" }, { "description", "Returns the currently tracked spatial offset for one player" }, { "params", json::array({ "player_id", "id", "player_name", "name", "prefix_match" }) } },
+        { { "action", "spatial.offset.set" }, { "description", "Sets the currently tracked spatial offset for one player" }, { "params", json::array({ "player_id", "id", "player_name", "name", "prefix_match", "offset", "x", "y", "z", "reason" }) } },
+        { { "action", "spatial.teleport_applied" }, { "description", "Applies teleport completion state and persists the player's spatial offset" }, { "params", json::array({ "target_id", "player_id", "offset", "x", "y", "z", "teleport", "position", "reason" }) } },
         { { "action", "vehicles.remove" }, { "description", "Removes one player vehicle" }, { "params", json::array({ "player_id", "vehicle_id" }) } },
         { { "action", "vehicles.list_all" }, { "description", "Lists all vehicles across all players" }, { "params", json::array({ "include_data", "include_position_raw", "include_position_parsed" }) } },
         { { "action", "vehicles.position_snapshots" }, { "description", "Lists all vehicle position snapshots across all players" }, { "params", json::array({ "include_parsed" }) } },
@@ -752,16 +803,91 @@ json TControlService::TriggerClientEventAction(const std::string& Action, const 
 
 json TControlService::SpatialTeleport(const json& Payload) {
     json EventPayload = Payload;
+    json EventData = Payload.value("data", json::object());
+    if (!EventData.is_object()) {
+        EventData = json::object();
+    }
+    EventData["reply_event_name"] = Payload.value("reply_event_name", std::string("BeamMPSpatialTeleportApplied"));
+    if (Payload.contains("request_id")) {
+        EventData["request_id"] = Payload.at("request_id");
+    }
     EventPayload["event_name"] = Payload.value("event_name", std::string("BeamMPSpatialTeleport"));
-    EventPayload["data"] = Payload.value("data", json::object()).dump();
+    EventPayload["data"] = EventData.dump();
     return TriggerClientEventAction("spatial.teleport", EventPayload);
 }
 
 json TControlService::SpatialRebase(const json& Payload) {
     json EventPayload = Payload;
+    json EventData = Payload.value("data", json::object());
+    if (!EventData.is_object()) {
+        EventData = json::object();
+    }
+    EventData["reply_event_name"] = Payload.value("reply_event_name", std::string("BeamMPSpatialRebaseApplied"));
+    if (Payload.contains("request_id")) {
+        EventData["request_id"] = Payload.at("request_id");
+    }
     EventPayload["event_name"] = Payload.value("event_name", std::string("BeamMPSpatialRebase"));
-    EventPayload["data"] = Payload.value("data", json::object()).dump();
+    EventPayload["data"] = EventData.dump();
     return TriggerClientEventAction("spatial.rebase", EventPayload);
+}
+
+json TControlService::SpatialOffsetGet(const json& Payload) const {
+    auto Client = FindClient(Payload, "spatial.offset.get");
+    if (!Client) {
+        return Error("spatial.offset.get", "Player not found");
+    }
+
+    const auto Offset = Client->GetSpatialOffset();
+    return Success("spatial.offset.get", {
+        { "player", SerializeClient(Client, false) },
+        { "offset", SerializeSpatialOffset(Offset) },
+    });
+}
+
+json TControlService::SpatialOffsetSet(const json& Payload) {
+    auto Client = FindClient(Payload, "spatial.offset.set");
+    if (!Client) {
+        return Error("spatial.offset.set", "Player not found");
+    }
+
+    const auto MaybeOffset = ParseSpatialOffset(Payload);
+    if (!MaybeOffset.has_value()) {
+        return Error("spatial.offset.set", "Expected offset as {x,y,z}, [x,y,z], or top-level x/y/z");
+    }
+
+    Client->SetSpatialOffset(*MaybeOffset);
+    const auto Snapshot = SerializeClient(Client, false);
+    Application::Console().RecordEvent("spatial", "offset_set", {
+        { "player", Snapshot },
+        { "offset", SerializeSpatialOffset(*MaybeOffset) },
+        { "reason", Payload.value("reason", std::string("api")) },
+    });
+    return Success("spatial.offset.set", {
+        { "player", Snapshot },
+        { "offset", SerializeSpatialOffset(*MaybeOffset) },
+    });
+}
+
+json TControlService::SpatialTeleportApplied(const json& Payload) {
+    json OffsetPayload = Payload;
+    if (Payload.contains("target_id") && !Payload.contains("player_id") && !Payload.contains("id")) {
+        OffsetPayload["player_id"] = Payload.at("target_id");
+    }
+
+    auto Result = SpatialOffsetSet(OffsetPayload);
+    if (!Result.value("ok", false)) {
+        return Result;
+    }
+
+    auto EventData = Result.at("data");
+    if (Payload.contains("teleport")) {
+        EventData["teleport"] = Payload.at("teleport");
+    }
+    if (Payload.contains("position")) {
+        EventData["position"] = Payload.at("position");
+    }
+    Application::Console().RecordEvent("spatial", "teleport_applied", EventData);
+    return Success("spatial.teleport_applied", std::move(EventData));
 }
 
 json TControlService::RemoveVehicle(const json& Payload) {
@@ -948,6 +1074,7 @@ json TControlService::SettingsSet(const json& Payload) {
 }
 
 json TControlService::SerializeClient(const std::shared_ptr<TClient>& Client, bool IncludeVehicles) const {
+    const auto SpatialOffset = Client->GetSpatialOffset();
     json Out {
         { "id", Client->GetID() },
         { "name", Client->GetName() },
@@ -962,6 +1089,11 @@ json TControlService::SerializeClient(const std::shared_ptr<TClient>& Client, bo
         { "seconds_since_last_ping", Client->SecondsSinceLastPing() },
         { "missed_packet_queue", Client->MissedPacketQueueSize() },
         { "identifiers", Client->GetIdentifiers() },
+        { "spatial_offset", {
+              SpatialOffset[0],
+              SpatialOffset[1],
+              SpatialOffset[2],
+          } },
     };
 
     if (IncludeVehicles) {

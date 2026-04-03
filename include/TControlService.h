@@ -84,6 +84,9 @@ private:
     [[nodiscard]] json PlayersDisconnect(const json& Payload);
     [[nodiscard]] json SpatialTeleport(const json& Payload);
     [[nodiscard]] json SpatialRebase(const json& Payload);
+    [[nodiscard]] json SpatialOffsetGet(const json& Payload) const;
+    [[nodiscard]] json SpatialOffsetSet(const json& Payload);
+    [[nodiscard]] json SpatialTeleportApplied(const json& Payload);
     [[nodiscard]] json ModsList() const;
     [[nodiscard]] json ModsReload();
     [[nodiscard]] json ModSetProtected(const json& Payload);
