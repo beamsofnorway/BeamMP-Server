@@ -104,6 +104,17 @@ bool TClient::TryBeginPendingSpatialRebase(const TSpatialOffset& Offset, const T
     return true;
 }
 
+bool TClient::HasPendingSpatialRebase() const {
+    std::unique_lock lock(mSpatialOffsetMutex);
+    return mPendingSpatialRebase.has_value();
+}
+
+bool TClient::IsAutomaticSpatialRebaseCoolingDown(std::chrono::milliseconds Cooldown) const {
+    std::unique_lock lock(mSpatialOffsetMutex);
+    const auto Now = std::chrono::steady_clock::now();
+    return mLastAutomaticSpatialRebaseAt.time_since_epoch().count() != 0 && Now - mLastAutomaticSpatialRebaseAt < Cooldown;
+}
+
 void TClient::ClearPendingSpatialRebase() {
     std::unique_lock lock(mSpatialOffsetMutex);
     mPendingSpatialRebase.reset();
@@ -112,6 +123,11 @@ void TClient::ClearPendingSpatialRebase() {
 TClient::TAutoRebaseThresholdBias TClient::GetAutoRebaseThresholdBias() const {
     std::unique_lock lock(mSpatialOffsetMutex);
     return mAutoRebaseThresholdBias;
+}
+
+void TClient::SetAutoRebaseThresholdBias(const TAutoRebaseThresholdBias& ThresholdBias) {
+    std::unique_lock lock(mSpatialOffsetMutex);
+    mAutoRebaseThresholdBias = ThresholdBias;
 }
 
 void TClient::Disconnect(std::string_view Reason) {

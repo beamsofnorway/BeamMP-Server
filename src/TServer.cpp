@@ -26,6 +26,7 @@
 #include <TLuaPlugin.h>
 #include <algorithm>
 #include <any>
+#include <cmath>
 #include <optional>
 #include <sstream>
 #include <utility>
@@ -88,6 +89,126 @@ json SerializeSpatialOffset(const SpatialOffset& Offset) {
     };
 }
 
+std::optional<SpatialOffset> ParseLocalPositionFromRawPacket(const std::string& Data) {
+    auto Payload = json::parse(Data, nullptr, false);
+    if (Payload.is_discarded() || !Payload.is_object() || !Payload.contains("pos") || !Payload.at("pos").is_array() || Payload.at("pos").size() < 3) {
+        return std::nullopt;
+    }
+
+    return SpatialOffset {
+        Payload.at("pos").at(0).get<double>(),
+        Payload.at("pos").at(1).get<double>(),
+        Payload.at("pos").at(2).get<double>(),
+    };
+}
+
+TClient::TAutoRebaseThresholdBias ClearRecoveredThresholdBias(
+    const TClient::TAutoRebaseThresholdBias& CurrentBias,
+    const SpatialOffset& LocalPosition,
+    int SafeLimit,
+    int RetriggerBand) {
+    auto UpdatedBias = CurrentBias;
+    const auto ClearLimit = std::max(0, SafeLimit - RetriggerBand);
+    for (size_t Axis = 0; Axis < 2; ++Axis) {
+        if (std::abs(LocalPosition[Axis]) <= static_cast<double>(ClearLimit)) {
+            UpdatedBias[Axis] = 0;
+        }
+    }
+
+    UpdatedBias[2] = 0;
+    return UpdatedBias;
+}
+
+struct AutomaticRebaseDecision {
+    SpatialOffset Offset;
+    TClient::TAutoRebaseThresholdBias ThresholdBias;
+};
+
+std::optional<AutomaticRebaseDecision> EvaluateAutomaticRebase(
+    const SpatialOffset& CurrentOffset,
+    const SpatialOffset& LocalPosition,
+    const TClient::TAutoRebaseThresholdBias& CurrentBias,
+    int SafeLimit,
+    int RetriggerBand) {
+    if (SafeLimit <= 0) {
+        return std::nullopt;
+    }
+
+    const auto WrapWidth = static_cast<double>(SafeLimit) * 2.0;
+    if (WrapWidth <= 0.0) {
+        return std::nullopt;
+    }
+
+    auto NextOffset = CurrentOffset;
+    auto NextBias = ClearRecoveredThresholdBias(CurrentBias, LocalPosition, SafeLimit, RetriggerBand);
+    bool Triggered = false;
+
+    for (size_t Axis = 0; Axis < 2; ++Axis) {
+        const auto PositiveThreshold = static_cast<double>(SafeLimit + (NextBias[Axis] < 0 ? RetriggerBand : 0));
+        const auto NegativeThreshold = -static_cast<double>(SafeLimit + (NextBias[Axis] > 0 ? RetriggerBand : 0));
+        if (LocalPosition[Axis] > PositiveThreshold) {
+            NextOffset[Axis] += WrapWidth;
+            NextBias[Axis] = 1;
+            Triggered = true;
+        } else if (LocalPosition[Axis] < NegativeThreshold) {
+            NextOffset[Axis] -= WrapWidth;
+            NextBias[Axis] = -1;
+            Triggered = true;
+        }
+    }
+
+    NextBias[2] = 0;
+    if (!Triggered) {
+        return std::nullopt;
+    }
+
+    return AutomaticRebaseDecision {
+        .Offset = NextOffset,
+        .ThresholdBias = NextBias,
+    };
+}
+
+bool SendAutomaticRebaseRequest(
+    TClient& Client,
+    const SpatialOffset& CurrentOffset,
+    const SpatialOffset& LocalPosition,
+    const AutomaticRebaseDecision& Decision,
+    int SafeLimit,
+    int RetriggerBand,
+    int CooldownMs) {
+    json Payload {
+        { "offset", SerializeSpatialOffset(Decision.Offset) },
+        { "reply_event_name", "BeamMPSpatialRebaseApplied" },
+        { "request_id", fmt::format("auto-rebase:{}:{}", Client.GetID(), std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count()) },
+        { "meta", {
+            { "automatic", true },
+            { "safe_limit_meters", SafeLimit },
+            { "wrap_width_meters", SafeLimit * 2 },
+            { "retrigger_band_meters", RetriggerBand },
+            { "cooldown_ms", CooldownMs },
+        } },
+    };
+
+    const auto Packet = StringToVector("E:BeamMPSpatialRebase:" + Payload.dump());
+    if (!LuaAPI::MP::Engine->Network().Respond(Client, Packet, true)) {
+        beammp_errorf("Failed to send automatic spatial rebase request to client '{}' ({})", Client.GetName(), Client.GetID());
+        LuaAPI::MP::Engine->Network().ClientKick(Client, "Disconnected after failing to receive automatic rebase packet");
+        return false;
+    }
+
+    Application::Console().RecordEvent("spatial", "rebase_requested", {
+        { "player", PlayerEventSnapshot(Client) },
+        { "automatic", true },
+        { "offset_before", SerializeSpatialOffset(CurrentOffset) },
+        { "offset_after", SerializeSpatialOffset(Decision.Offset) },
+        { "local_position", SerializeSpatialOffset(LocalPosition) },
+        { "safe_limit_meters", SafeLimit },
+        { "retrigger_band_meters", RetriggerBand },
+        { "cooldown_ms", CooldownMs },
+    });
+    return true;
+}
+
 bool HandleSpatialAppliedClientEvent(TClient& Client, const std::string& Name, const std::string& Data) {
     if (Name != "BeamMPSpatialTeleportApplied" && Name != "BeamMPSpatialRebaseApplied") {
         return false;
@@ -104,6 +225,16 @@ bool HandleSpatialAppliedClientEvent(TClient& Client, const std::string& Name, c
         beammp_warnf("Client '{}' ({}) sent spatial applied event '{}' without a valid offset", Client.GetName(), Client.GetID(), Name);
         return true;
     }
+
+    beammp_infof(
+        "Received spatial applied event client='{}' ({}) name='{}' offset=({:.3f}, {:.3f}, {:.3f}) request_id={}",
+        Client.GetName(),
+        Client.GetID(),
+        Name,
+        (*MaybeOffset)[0],
+        (*MaybeOffset)[1],
+        (*MaybeOffset)[2],
+        Payload.contains("request_id") ? Payload.at("request_id").dump() : std::string("null"));
 
     Client.SetSpatialOffset(*MaybeOffset);
 
@@ -734,5 +865,69 @@ TEST_CASE("ParsePositionPacket") {
 void TServer::HandlePosition(TClient& c, const std::string& Packet) {
     if (auto Parsed = ParsePositionPacket(Packet); Parsed.has_value()) {
         c.SetCarPosition(Parsed.value().VID, Parsed.value().Data);
+
+        const auto MaybeLocalPosition = ParseLocalPositionFromRawPacket(Parsed.value().Data);
+        if (!MaybeLocalPosition.has_value()) {
+            return;
+        }
+
+        const auto SafeLimit = Application::Settings.getAsInt(Settings::Key::SpatialRebase_AutoSafeLimitMeters);
+        if (SafeLimit <= 0) {
+            return;
+        }
+
+        const auto RetriggerBand = std::max(0, Application::Settings.getAsInt(Settings::Key::SpatialRebase_AutoRetriggerBandMeters));
+        const auto CooldownMs = std::max(0, Application::Settings.getAsInt(Settings::Key::SpatialRebase_AutoCooldownMs));
+        const auto CurrentOffset = c.GetSpatialOffset();
+        const auto CurrentBias = c.GetAutoRebaseThresholdBias();
+        const auto ClearedBias = ClearRecoveredThresholdBias(CurrentBias, *MaybeLocalPosition, SafeLimit, RetriggerBand);
+        if (ClearedBias != CurrentBias) {
+            c.SetAutoRebaseThresholdBias(ClearedBias);
+        }
+
+        const auto MaybeDecision = EvaluateAutomaticRebase(CurrentOffset, *MaybeLocalPosition, ClearedBias, SafeLimit, RetriggerBand);
+        if (!MaybeDecision.has_value()) {
+            return;
+        }
+
+        beammp_infof(
+            "Auto spatial rebase candidate client='{}' ({}) local=({:.3f}, {:.3f}, {:.3f}) current_offset=({:.3f}, {:.3f}, {:.3f}) next_offset=({:.3f}, {:.3f}, {:.3f}) safe_limit={} retrigger_band={} cooldown_ms={}",
+            c.GetName(),
+            c.GetID(),
+            (*MaybeLocalPosition)[0],
+            (*MaybeLocalPosition)[1],
+            (*MaybeLocalPosition)[2],
+            CurrentOffset[0],
+            CurrentOffset[1],
+            CurrentOffset[2],
+            MaybeDecision->Offset[0],
+            MaybeDecision->Offset[1],
+            MaybeDecision->Offset[2],
+            SafeLimit,
+            RetriggerBand,
+            CooldownMs);
+
+        if (!c.TryBeginPendingSpatialRebase(MaybeDecision->Offset, MaybeDecision->ThresholdBias, std::chrono::milliseconds(CooldownMs))) {
+            const auto PendingActive = c.HasPendingSpatialRebase();
+            const auto CoolingDown = c.IsAutomaticSpatialRebaseCoolingDown(std::chrono::milliseconds(CooldownMs));
+            beammp_warnf(
+                "Suppressed auto spatial rebase client='{}' ({}) local=({:.3f}, {:.3f}, {:.3f}) current_offset=({:.3f}, {:.3f}, {:.3f}) next_offset=({:.3f}, {:.3f}, {:.3f}) pending_active={} cooldown_active={}",
+                c.GetName(),
+                c.GetID(),
+                (*MaybeLocalPosition)[0],
+                (*MaybeLocalPosition)[1],
+                (*MaybeLocalPosition)[2],
+                CurrentOffset[0],
+                CurrentOffset[1],
+                CurrentOffset[2],
+                MaybeDecision->Offset[0],
+                MaybeDecision->Offset[1],
+                MaybeDecision->Offset[2],
+                PendingActive,
+                CoolingDown);
+            return;
+        }
+
+        (void)SendAutomaticRebaseRequest(c, CurrentOffset, *MaybeLocalPosition, *MaybeDecision, SafeLimit, RetriggerBand, CooldownMs);
     }
 }

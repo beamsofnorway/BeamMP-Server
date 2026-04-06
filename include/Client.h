@@ -73,8 +73,11 @@ public:
     void SetSpatialOffset(const TSpatialOffset& Offset);
     [[nodiscard]] TSpatialOffset GetSpatialOffset() const;
     [[nodiscard]] bool TryBeginPendingSpatialRebase(const TSpatialOffset& Offset, const TAutoRebaseThresholdBias& ThresholdBias, std::chrono::milliseconds Cooldown);
+    [[nodiscard]] bool HasPendingSpatialRebase() const;
+    [[nodiscard]] bool IsAutomaticSpatialRebaseCoolingDown(std::chrono::milliseconds Cooldown) const;
     void ClearPendingSpatialRebase();
     [[nodiscard]] TAutoRebaseThresholdBias GetAutoRebaseThresholdBias() const;
+    void SetAutoRebaseThresholdBias(const TAutoRebaseThresholdBias& ThresholdBias);
     void SetUDPAddr(const ip::udp::endpoint& Addr) { mUDPAddress = Addr; }
     void SetTCPSock(ip::tcp::socket&& CSock) { mSocket = std::move(CSock); }
     void Disconnect(std::string_view Reason);
