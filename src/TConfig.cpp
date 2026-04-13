@@ -183,11 +183,11 @@ void TConfig::FlushToFile() {
     SetComment(data["HttpApi"][StrHttpApiToken.data()].comments(), " Optional bearer token for the HTTP API. Leave empty to allow loopback-only access without a token");
     // SpatialRebase
     data["SpatialRebase"][StrSpatialRebaseAutoSafeLimitMeters.data()] = Application::Settings.getAsInt(Settings::Key::SpatialRebase_AutoSafeLimitMeters);
-    SetComment(data["SpatialRebase"][StrSpatialRebaseAutoSafeLimitMeters.data()].comments(), " Auto-rebase trigger limit on each horizontal axis in local meters. Wrap width is derived as this value times two");
+    SetComment(data["SpatialRebase"][StrSpatialRebaseAutoSafeLimitMeters.data()].comments(), " Deprecated in this fork. Automatic rebasing is externally orchestrated; keep this at 0.");
     data["SpatialRebase"][StrSpatialRebaseAutoRetriggerBandMeters.data()] = Application::Settings.getAsInt(Settings::Key::SpatialRebase_AutoRetriggerBandMeters);
-    SetComment(data["SpatialRebase"][StrSpatialRebaseAutoRetriggerBandMeters.data()].comments(), " Extra one-sided hysteresis distance before the opposite-direction auto-rebase can retrigger after a wrap");
+    SetComment(data["SpatialRebase"][StrSpatialRebaseAutoRetriggerBandMeters.data()].comments(), " Deprecated in this fork. Automatic rebasing is externally orchestrated.");
     data["SpatialRebase"][StrSpatialRebaseAutoCooldownMs.data()] = Application::Settings.getAsInt(Settings::Key::SpatialRebase_AutoCooldownMs);
-    SetComment(data["SpatialRebase"][StrSpatialRebaseAutoCooldownMs.data()].comments(), " Minimum milliseconds between automatic rebase requests for one player");
+    SetComment(data["SpatialRebase"][StrSpatialRebaseAutoCooldownMs.data()].comments(), " Deprecated in this fork. Automatic rebasing is externally orchestrated.");
     // Misc
     data["Misc"][StrHideUpdateMessages.data()] = Application::Settings.getAsBool(Settings::Key::Misc_ImScaredOfUpdates);
     SetComment(data["Misc"][StrHideUpdateMessages.data()].comments(), " Hides the periodic update message which notifies you of a new server version. You should really keep this on and always update as soon as possible. For more information visit https://wiki.beammp.com/en/home/server-maintenance#updating-the-server. An update message will always appear at startup regardless.");

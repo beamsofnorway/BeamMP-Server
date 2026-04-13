@@ -99,6 +99,9 @@ Environment overrides:
 
 The HTTP branch adds helper endpoints that wrap client events:
 
+- Automatic rebasing is not performed by the server runtime in this fork.
+- The server only exposes explicit spatial control endpoints; external orchestration is expected.
+
 - `POST /api/spatial/teleport`
   - sends `BeamMPSpatialTeleport`
   - defaults `reply_event_name` to `BeamMPSpatialTeleportApplied`

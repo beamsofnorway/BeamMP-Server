@@ -102,115 +102,6 @@ std::optional<SpatialOffset> ParseLocalPositionFromRawPacket(const std::string& 
     };
 }
 
-TClient::TAutoRebaseThresholdBias ClearRecoveredThresholdBias(
-    const TClient::TAutoRebaseThresholdBias& CurrentBias,
-    const SpatialOffset& LocalPosition,
-    int SafeLimit,
-    int RetriggerBand) {
-    auto UpdatedBias = CurrentBias;
-    const auto ClearLimit = std::max(0, SafeLimit - RetriggerBand);
-    for (size_t Axis = 0; Axis < 2; ++Axis) {
-        if (std::abs(LocalPosition[Axis]) <= static_cast<double>(ClearLimit)) {
-            UpdatedBias[Axis] = 0;
-        }
-    }
-
-    UpdatedBias[2] = 0;
-    return UpdatedBias;
-}
-
-struct AutomaticRebaseDecision {
-    SpatialOffset Offset;
-    TClient::TAutoRebaseThresholdBias ThresholdBias;
-};
-
-std::optional<AutomaticRebaseDecision> EvaluateAutomaticRebase(
-    const SpatialOffset& CurrentOffset,
-    const SpatialOffset& LocalPosition,
-    const TClient::TAutoRebaseThresholdBias& CurrentBias,
-    int SafeLimit,
-    int RetriggerBand) {
-    if (SafeLimit <= 0) {
-        return std::nullopt;
-    }
-
-    const auto WrapWidth = static_cast<double>(SafeLimit) * 2.0;
-    if (WrapWidth <= 0.0) {
-        return std::nullopt;
-    }
-
-    auto NextOffset = CurrentOffset;
-    auto NextBias = ClearRecoveredThresholdBias(CurrentBias, LocalPosition, SafeLimit, RetriggerBand);
-    bool Triggered = false;
-
-    for (size_t Axis = 0; Axis < 2; ++Axis) {
-        const auto PositiveThreshold = static_cast<double>(SafeLimit + (NextBias[Axis] < 0 ? RetriggerBand : 0));
-        const auto NegativeThreshold = -static_cast<double>(SafeLimit + (NextBias[Axis] > 0 ? RetriggerBand : 0));
-        if (LocalPosition[Axis] > PositiveThreshold) {
-            const auto WrapSteps = std::max(1, static_cast<int>(std::ceil((LocalPosition[Axis] - PositiveThreshold) / WrapWidth)));
-            NextOffset[Axis] += WrapWidth * static_cast<double>(WrapSteps);
-            NextBias[Axis] = 1;
-            Triggered = true;
-        } else if (LocalPosition[Axis] < NegativeThreshold) {
-            const auto WrapSteps = std::max(1, static_cast<int>(std::ceil((NegativeThreshold - LocalPosition[Axis]) / WrapWidth)));
-            NextOffset[Axis] -= WrapWidth * static_cast<double>(WrapSteps);
-            NextBias[Axis] = -1;
-            Triggered = true;
-        }
-    }
-
-    NextBias[2] = 0;
-    if (!Triggered) {
-        return std::nullopt;
-    }
-
-    return AutomaticRebaseDecision {
-        .Offset = NextOffset,
-        .ThresholdBias = NextBias,
-    };
-}
-
-bool SendAutomaticRebaseRequest(
-    TClient& Client,
-    const SpatialOffset& CurrentOffset,
-    const SpatialOffset& LocalPosition,
-    const AutomaticRebaseDecision& Decision,
-    int SafeLimit,
-    int RetriggerBand,
-    int CooldownMs) {
-    json Payload {
-        { "offset", SerializeSpatialOffset(Decision.Offset) },
-        { "reply_event_name", "BeamMPSpatialRebaseApplied" },
-        { "request_id", fmt::format("auto-rebase:{}:{}", Client.GetID(), std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count()) },
-        { "meta", {
-            { "automatic", true },
-            { "safe_limit_meters", SafeLimit },
-            { "wrap_width_meters", SafeLimit * 2 },
-            { "retrigger_band_meters", RetriggerBand },
-            { "cooldown_ms", CooldownMs },
-        } },
-    };
-
-    const auto Packet = StringToVector("E:BeamMPSpatialRebase:" + Payload.dump());
-    if (!LuaAPI::MP::Engine->Network().Respond(Client, Packet, true)) {
-        beammp_errorf("Failed to send automatic spatial rebase request to client '{}' ({})", Client.GetName(), Client.GetID());
-        LuaAPI::MP::Engine->Network().ClientKick(Client, "Disconnected after failing to receive automatic rebase packet");
-        return false;
-    }
-
-    Application::Console().RecordEvent("spatial", "rebase_requested", {
-        { "player", PlayerEventSnapshot(Client) },
-        { "automatic", true },
-        { "offset_before", SerializeSpatialOffset(CurrentOffset) },
-        { "offset_after", SerializeSpatialOffset(Decision.Offset) },
-        { "local_position", SerializeSpatialOffset(LocalPosition) },
-        { "safe_limit_meters", SafeLimit },
-        { "retrigger_band_meters", RetriggerBand },
-        { "cooldown_ms", CooldownMs },
-    });
-    return true;
-}
-
 bool HandleSpatialAppliedClientEvent(TClient& Client, const std::string& Name, const std::string& Data) {
     if (Name != "BeamMPSpatialTeleportApplied" && Name != "BeamMPSpatialRebaseApplied") {
         return false;
@@ -858,34 +749,8 @@ void TServer::HandlePosition(TClient& c, const std::string& Packet) {
     if (auto Parsed = ParsePositionPacket(Packet); Parsed.has_value()) {
         c.SetCarPosition(Parsed.value().VID, Parsed.value().Data);
 
-        const auto MaybeLocalPosition = ParseLocalPositionFromRawPacket(Parsed.value().Data);
-        if (!MaybeLocalPosition.has_value()) {
-            return;
-        }
-
-        const auto SafeLimit = Application::Settings.getAsInt(Settings::Key::SpatialRebase_AutoSafeLimitMeters);
-        if (SafeLimit <= 0) {
-            return;
-        }
-
-        const auto RetriggerBand = std::max(0, Application::Settings.getAsInt(Settings::Key::SpatialRebase_AutoRetriggerBandMeters));
-        const auto CooldownMs = std::max(0, Application::Settings.getAsInt(Settings::Key::SpatialRebase_AutoCooldownMs));
-        const auto CurrentOffset = c.GetSpatialOffset();
-        const auto CurrentBias = c.GetAutoRebaseThresholdBias();
-        const auto ClearedBias = ClearRecoveredThresholdBias(CurrentBias, *MaybeLocalPosition, SafeLimit, RetriggerBand);
-        if (ClearedBias != CurrentBias) {
-            c.SetAutoRebaseThresholdBias(ClearedBias);
-        }
-
-        const auto MaybeDecision = EvaluateAutomaticRebase(CurrentOffset, *MaybeLocalPosition, ClearedBias, SafeLimit, RetriggerBand);
-        if (!MaybeDecision.has_value()) {
-            return;
-        }
-
-        if (!c.TryBeginPendingSpatialRebase(MaybeDecision->Offset, MaybeDecision->ThresholdBias, std::chrono::milliseconds(CooldownMs))) {
-            return;
-        }
-
-        (void)SendAutomaticRebaseRequest(c, CurrentOffset, *MaybeLocalPosition, *MaybeDecision, SafeLimit, RetriggerBand, CooldownMs);
+        // Automatic spatial rebasing is intentionally not owned by the BeamMP server fork anymore.
+        // The external manager is the sole rebase coordinator; the server only exposes explicit spatial APIs.
+        (void)ParseLocalPositionFromRawPacket(Parsed.value().Data);
     }
 }
