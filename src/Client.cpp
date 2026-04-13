@@ -34,11 +34,16 @@ void TClient::DeleteCar(int Ident) {
     } else {
         beammp_debug("tried to erase a vehicle that doesn't exist (not an error)");
     }
+
+    ClearLocalOnlyVehicle(Ident);
 }
 
 void TClient::ClearCars() {
     std::unique_lock lock(mVehicleDataMutex);
     mVehicleData.clear();
+
+    std::unique_lock localOnlyLock(mLocalOnlyVehiclesMutex);
+    mLocalOnlyVehicleIds.clear();
 }
 
 int TClient::GetOpenCarID() const {
@@ -60,6 +65,21 @@ int TClient::GetOpenCarID() const {
 void TClient::AddNewCar(int Ident, const nlohmann::json& Data) {
     std::unique_lock lock(mVehicleDataMutex);
     mVehicleData.emplace_back(Ident, Data);
+}
+
+void TClient::MarkLocalOnlyVehicle(int Ident) {
+    std::unique_lock lock(mLocalOnlyVehiclesMutex);
+    mLocalOnlyVehicleIds.insert(Ident);
+}
+
+bool TClient::IsLocalOnlyVehicle(int Ident) const {
+    std::unique_lock lock(mLocalOnlyVehiclesMutex);
+    return mLocalOnlyVehicleIds.contains(Ident);
+}
+
+void TClient::ClearLocalOnlyVehicle(int Ident) {
+    std::unique_lock lock(mLocalOnlyVehiclesMutex);
+    mLocalOnlyVehicleIds.erase(Ident);
 }
 
 TClient::TVehicleDataLockPair TClient::GetAllCars() {

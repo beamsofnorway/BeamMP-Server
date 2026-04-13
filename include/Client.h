@@ -61,6 +61,9 @@ public:
     TClient& operator=(const TClient&) = delete;
 
     void AddNewCar(int Ident, const nlohmann::json& Data);
+    void MarkLocalOnlyVehicle(int Ident);
+    [[nodiscard]] bool IsLocalOnlyVehicle(int Ident) const;
+    void ClearLocalOnlyVehicle(int Ident);
     void SetCarData(int Ident, const nlohmann::json& Data);
     void SetCarPosition(int Ident, const std::string& Data);
     TVehicleDataLockPair GetAllCars();
@@ -139,8 +142,10 @@ private:
     bool mIsGuest = false;
     mutable std::mutex mVehicleDataMutex;
     mutable std::mutex mVehiclePositionMutex;
+    mutable std::mutex mLocalOnlyVehiclesMutex;
     mutable std::mutex mSpatialOffsetMutex;
     TSetOfVehicleData mVehicleData;
+    std::unordered_set<int> mLocalOnlyVehicleIds;
     SparseArray<std::string> mVehiclePosition;
     TSpatialOffset mSpatialOffset { 0.0, 0.0, 0.0 };
     std::string mName = "Unknown Client";

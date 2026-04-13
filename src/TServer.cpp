@@ -474,9 +474,28 @@ bool TServer::IsUnicycle(TClient& c, const std::string& CarJson) {
     return false;
 }
 
+static bool IsManagerHelperVehicle(const std::string& CarJson) {
+    try {
+        auto Car = nlohmann::json::parse(CarJson);
+        const std::string model = Car.value("model", "");
+        const std::string jbm = Car.value("jbm", "");
+        const std::string partConfig = Car.value("partConfig", "");
+        return model == "staticPropKit"
+            || model == "bonStaticPropKit"
+            || jbm == "staticPropKit"
+            || jbm == "bonStaticPropKit"
+            || partConfig.find("staticPropKit") != std::string::npos
+            || partConfig.find("bonStaticPropKit") != std::string::npos;
+    } catch (const std::exception&) {
+        return false;
+    }
+}
+
 bool TServer::ShouldSpawn(TClient& c, const std::string& CarJson, int ID) {
     if (IsUnicycle(c, CarJson) && c.GetUnicycleID() < 0) {
         c.SetUnicycleID(ID);
+        return true;
+    } else if (IsManagerHelperVehicle(CarJson)) {
         return true;
     } else {
         return c.GetCarCount() < Application::Settings.getAsInt(Settings::Key::General_MaxCars);
@@ -509,7 +528,12 @@ void TServer::ParseVehicle(TClient& c, const std::string& Pckt, TNetwork& Networ
 
             bool SpawnConfirmed = false;
             auto CarJsonDoc = nlohmann::json::parse(CarJson, nullptr, false);
-            if (ShouldSpawn(c, CarJson, CarID) && !ShouldntSpawn && !CarJsonDoc.is_discarded()) {
+            const bool IsHelperVehicle = !CarJsonDoc.is_discarded() && IsManagerHelperVehicle(CarJson);
+            if (IsHelperVehicle && !ShouldntSpawn) {
+                c.MarkLocalOnlyVehicle(CarID);
+                beammp_debugf("'{}' spawned local-only helper vehicle {}", c.GetName(), CarID);
+                SpawnConfirmed = true;
+            } else if (ShouldSpawn(c, CarJson, CarID) && !ShouldntSpawn && !CarJsonDoc.is_discarded()) {
                 c.AddNewCar(CarID, CarJsonDoc);
                 Network.SendToAll(nullptr, StringToVector(Packet), true, true);
                 SpawnConfirmed = true;
@@ -537,6 +561,10 @@ void TServer::ParseVehicle(TClient& c, const std::string& Pckt, TNetwork& Networ
             std::tie(PID, VID) = MaybePidVid.value();
         }
         if (PID != -1 && VID != -1 && PID == c.GetID()) {
+            if (c.IsLocalOnlyVehicle(VID)) {
+                return;
+            }
+
             auto Futures = LuaAPI::MP::Engine->TriggerEvent("onVehicleEdited", "", c.GetID(), VID, Packet.substr(3));
             TLuaEngine::WaitForAll(Futures);
             bool ShouldntAllow = std::any_of(Futures.begin(), Futures.end(),
@@ -576,6 +604,11 @@ void TServer::ParseVehicle(TClient& c, const std::string& Pckt, TNetwork& Networ
             std::tie(PID, VID) = MaybePidVid.value();
         }
         if (PID != -1 && VID != -1 && PID == c.GetID()) {
+            if (c.IsLocalOnlyVehicle(VID)) {
+                c.ClearLocalOnlyVehicle(VID);
+                return;
+            }
+
             if (c.GetUnicycleID() == VID) {
                 c.SetUnicycleID(-1);
             }
@@ -595,6 +628,10 @@ void TServer::ParseVehicle(TClient& c, const std::string& Pckt, TNetwork& Networ
         }
 
         if (PID != -1 && VID != -1 && PID == c.GetID()) {
+            if (c.IsLocalOnlyVehicle(VID)) {
+                return;
+            }
+
             auto BracketPos = Data.find('{');
             if (BracketPos == std::string::npos) {
                 beammp_debugf("Invalid 'Or' packet body from client {}", c.GetID());
@@ -614,11 +651,22 @@ void TServer::ParseVehicle(TClient& c, const std::string& Pckt, TNetwork& Networ
             std::tie(PID, VID) = MaybePidVid.value();
         }
         if (PID != -1 && VID != -1 && PID == c.GetID()) {
+            if (c.IsLocalOnlyVehicle(VID)) {
+                return;
+            }
+
             Network.SendToAll(&c, StringToVector(Packet), false, true);
         }
         return;
     }
     case 'm': {
+        auto MaybePidVid = GetPidVid(Data.substr(0, Data.find(':', 1)));
+        if (MaybePidVid) {
+            std::tie(PID, VID) = MaybePidVid.value();
+        }
+        if (PID != -1 && VID != -1 && PID == c.GetID() && c.IsLocalOnlyVehicle(VID)) {
+            return;
+        }
         Network.SendToAll(&c, StringToVector(Packet), false, true);
         return;
     }
@@ -630,6 +678,10 @@ void TServer::ParseVehicle(TClient& c, const std::string& Pckt, TNetwork& Networ
         }
 
         if (PID != -1 && VID != -1 && PID == c.GetID()) {
+            if (c.IsLocalOnlyVehicle(VID)) {
+                return;
+            }
+
             auto BracketPos = Data.find('[');
             if (BracketPos == std::string::npos) {
                 beammp_debugf("Invalid 'Op' packet body from client {}", c.GetID());
