@@ -19,6 +19,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <memory>
@@ -76,8 +77,11 @@ public:
     [[nodiscard]] TSpatialOffset GetSpatialOffset() const;
     void SetUDPAddr(const ip::udp::endpoint& Addr) { mUDPAddress = Addr; }
     void SetTCPSock(ip::tcp::socket&& CSock) { mSocket = std::move(CSock); }
-    void Disconnect(std::string_view Reason);
-    bool IsDisconnected() const { return mDisconnectRequested || !mSocket.is_open(); }
+    // Returns true only for the thread that actually performs socket shutdown/close.
+    [[nodiscard]] bool Disconnect(std::string_view Reason);
+    bool IsDisconnected() const {
+        return mDisconnectState.load(std::memory_order_acquire) != EDisconnectState::Connected;
+    }
     // locks
     void DeleteCar(int Ident);
     [[nodiscard]] const std::unordered_map<std::string, std::string>& GetIdentifiers() const { return mIdentifiers; }
@@ -123,6 +127,12 @@ public:
     [[nodiscard]] const std::vector<uint8_t>& GetMagic() const { return mMagic; }
 
 private:
+    enum class EDisconnectState {
+        Connected,
+        Disconnecting,
+        Disconnected
+    };
+
     void InsertVehicle(int ID, const std::string& Data);
 
     TServer& mServer;
@@ -149,6 +159,8 @@ private:
     SparseArray<std::string> mVehiclePosition;
     TSpatialOffset mSpatialOffset { 0.0, 0.0, 0.0 };
     std::string mName = "Unknown Client";
+    // Once disconnect starts, this client is terminal and its socket must be treated as dead.
+    std::atomic<EDisconnectState> mDisconnectState { EDisconnectState::Connected };
     ip::tcp::socket mSocket;
     ip::udp::endpoint mUDPAddress {};
     int mUnicycleID = -1;

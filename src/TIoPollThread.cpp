@@ -16,33 +16,22 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-#pragma once
+#include "TIoPollThread.h"
 
-#include <optional>
-#include <string>
-#include <string_view>
-namespace Env {
+TIoPollThread::TIoPollThread()
+    : mWorkGuard(boost::asio::make_work_guard(mIoCtx))
+    , mThread([this](std::stop_token StopToken) {
+        while (!StopToken.stop_requested()) {
+            try {
+                mIoCtx.run();
+                break;
+            } catch (...) {
+                mIoCtx.restart();
+            }
+        }
+    }) { }
 
-enum class Key {
-    MAX_CONCURRENT_CONNECTIONS,
-    // provider settings
-    PROVIDER_UPDATE_MESSAGE,
-    PROVIDER_DISABLE_CONFIG,
-    PROVIDER_DISABLE_MP_SET,
-    PROVIDER_PORT_ENV,
-    PROVIDER_IP_ENV,
-
-    // HTTP API settings
-    HTTP_API_ENABLED,
-    HTTP_API_HOST,
-    HTTP_API_PORT,
-    HTTP_API_TOKEN
-};
-
-std::optional<std::string> Get(Key key);
-bool Set(Key key, std::string_view value);
-bool Set(std::string_view key, std::string_view value);
-
-std::string_view ToString(Key key);
-
+TIoPollThread::~TIoPollThread() {
+    mWorkGuard.reset();
+    mIoCtx.stop();
 }

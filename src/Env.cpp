@@ -75,6 +75,8 @@ std::string_view Env::ToString(Env::Key key) {
         break;
     case Key::HTTP_API_TOKEN:
         return "BEAMMP_HTTP_API_TOKEN";
+    case Key::MAX_CONCURRENT_CONNECTIONS:
+        return "BEAMMP_MAX_CONCURRENT_CONNECTIONS";
         break;
     }
     return "";

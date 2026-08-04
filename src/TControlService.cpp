@@ -342,6 +342,7 @@ json TControlService::RecentEvents(const json& Payload) const {
 }
 
 json TControlService::ServerStatus() const {
+    const auto ConnectionLimiterStats = mNetwork.GetConnectionLimiterStats();
     size_t CarCount = 0;
     size_t ConnectedCount = 0;
     size_t GuestCount = 0;
@@ -376,6 +377,14 @@ json TControlService::ServerStatus() const {
         { "missed_packet_queue_sum", MissedPacketQueueSum },
         { "uptime_ms", mServer.UptimeTimer.GetElapsedTime() },
         { "pps", Application::PPS() },
+        { "connection_limiter", {
+              { "active_global", ConnectionLimiterStats.CurrentGlobal },
+              { "max_global", ConnectionLimiterStats.MaxGlobal },
+              { "active_ip_buckets", ConnectionLimiterStats.ActiveIpBuckets },
+              { "highest_single_ip_load", ConnectionLimiterStats.CurrentMaxPerIp },
+              { "max_per_ip", ConnectionLimiterStats.MaxPerIp },
+              { "saturated_ip_buckets", ConnectionLimiterStats.SaturatedIpBuckets },
+          } },
         { "lua", {
               { "queued_results_to_check", mLuaEngine.GetResultsToCheckSize() },
               { "states", mLuaEngine.GetLuaStateCount() },

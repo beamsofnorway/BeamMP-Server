@@ -22,10 +22,10 @@
 
 #include "Client.h"
 #include "CustomAssert.h"
+#include "Http.h"
 #include "LuaAPI.h"
 #include "TControlService.h"
 #include "TLuaEngine.h"
-#include "Http.h"
 
 #include <ctime>
 #include <chrono>
@@ -304,8 +304,7 @@ void TConsole::Command_NetTest(const std::string& cmd, const std::vector<std::st
     unsigned int status = 0;
 
     std::string T = Http::GET(
-    Application::GetServerCheckUrl() + "/api/v2/beammp/" + std::to_string(Application::Settings.getAsInt(Settings::Key::General_Port)), &status
-        );
+        Application::GetServerCheckUrl() + "/api/v2/beammp/" + std::to_string(Application::Settings.getAsInt(Settings::Key::General_Port)), &status);
 
     beammp_debugf("Status and response from Server Check API: {0}, {1}", status, T);
 
@@ -351,7 +350,7 @@ std::tuple<std::string, std::vector<std::string>> TConsole::ParseCommand(const s
     // It correctly splits arguments, including respecting single and double quotes, as well as backticks
     auto End_i = CommandWithArgs.find_first_of(' ');
     std::string Command = CommandWithArgs.substr(0, End_i);
-    std::string ArgsStr {};
+    std::string ArgsStr { };
     if (End_i != std::string::npos) {
         ArgsStr = CommandWithArgs.substr(End_i);
     }
@@ -596,6 +595,7 @@ void TConsole::Command_Status(const std::string&, const std::vector<std::string>
     const auto& Lua = Data.at("lua");
     const auto& Subsystems = Data.at("subsystems");
     const auto& Counts = Subsystems.at("counts");
+    const auto& ConnectionLimiter = Data.at("connection_limiter");
     std::stringstream Status;
 
     auto JoinSubsystems = [](const nlohmann::json& Systems, const std::string& Name) {
@@ -624,6 +624,11 @@ void TConsole::Command_Status(const std::string&, const std::vector<std::string>
            << "\t\tStates:                      " << Lua.at("states").get<size_t>() << "\n"
            << "\t\tEvent timers:                " << Lua.at("event_timers").get<size_t>() << "\n"
            << "\t\tEvent handlers:              " << Lua.at("event_handlers").get<size_t>() << "\n"
+           << "\tConnection limiter:\n"
+           << "\t\tActive/Max global:           " << ConnectionLimiter.at("active_global").get<size_t>() << "/" << ConnectionLimiter.at("max_global").get<size_t>() << "\n"
+           << "\t\tActive IP buckets:           " << ConnectionLimiter.at("active_ip_buckets").get<size_t>() << "\n"
+           << "\t\tHighest single IP load:      " << ConnectionLimiter.at("highest_single_ip_load").get<size_t>() << "/" << ConnectionLimiter.at("max_per_ip").get<size_t>() << "\n"
+           << "\t\tSaturated IP buckets:        " << ConnectionLimiter.at("saturated_ip_buckets").get<size_t>() << "\n"
            << "\tSubsystems:\n"
            << "\t\tGood/Starting/Bad:           " << Counts.at("good").get<size_t>() << "/" << Counts.at("starting").get<size_t>() << "/" << Counts.at("bad").get<size_t>() << "\n"
            << "\t\tShutting down/Shut down:     " << Counts.at("shutting_down").get<size_t>() << "/" << Counts.at("shutdown").get<size_t>() << "\n"
@@ -640,9 +645,13 @@ void TConsole::Command_Status(const std::string&, const std::vector<std::string>
 void TConsole::RunAsCommand(const std::string& cmd, bool IgnoreNotACommand) {
     auto FutureIsNonNil =
         [](const std::shared_ptr<TLuaResult>& Future) {
-            if (!Future->Error && Future->Result.valid()) {
-                auto Type = Future->Result.get_type();
-                return Type != sol::type::lua_nil && Type != sol::type::none;
+            if (!Future->IsError()) {
+                auto Snapshot = Future->GetDetachedSnapshot();
+                if (Snapshot.Result.V.valueless_by_exception() || std::get_if<std::monostate>(&Snapshot.Result.V) != nullptr) {
+                    // no value contained
+                    return false;
+                }
+                return true;
             }
             return false;
         };
@@ -652,7 +661,7 @@ void TConsole::RunAsCommand(const std::string& cmd, bool IgnoreNotACommand) {
         TLuaEngine::WaitForAll(Futures, std::chrono::seconds(5));
         size_t Count = 0;
         for (auto& Future : Futures) {
-            if (!Future->Error) {
+            if (!Future->IsError()) {
                 ++Count;
             }
         }
@@ -670,14 +679,16 @@ void TConsole::RunAsCommand(const std::string& cmd, bool IgnoreNotACommand) {
         std::stringstream Reply;
         if (NonNilFutures.size() > 1) {
             for (size_t i = 0; i < NonNilFutures.size(); ++i) {
-                Reply << NonNilFutures[i]->StateId << ": \n"
-                      << LuaAPI::LuaToString(NonNilFutures[i]->Result);
+                auto Snapshot = NonNilFutures[i]->GetDetachedSnapshot();
+                Reply << Snapshot.StateId << ": \n"
+                      << Snapshot.Result;
                 if (i < NonNilFutures.size() - 1) {
                     Reply << "\n";
                 }
             }
         } else {
-            Reply << LuaAPI::LuaToString(NonNilFutures[0]->Result);
+            auto Snapshot = NonNilFutures[0]->GetDetachedSnapshot();
+            Reply << Snapshot.Result;
         }
         Application::Console().WriteRaw(Reply.str());
     }
@@ -758,8 +769,9 @@ void TConsole::InitializeCommandline() {
                 } else {
                     auto Future = mLuaEngine->EnqueueScript(mStateId, { std::make_shared<std::string>(TrimmedCmd), "", "" });
                     Future->WaitUntilReady();
-                    if (Future->Error) {
-                        beammp_lua_error("error in " + mStateId + ": " + Future->ErrorMessage);
+                    if (Future->IsError()) {
+                        auto Snapshot = Future->GetSnapshot();
+                        beammp_lua_error("error in " + mStateId + ": " + Snapshot.ErrorMessage);
                     }
                 }
             } else {
@@ -791,7 +803,7 @@ void TConsole::InitializeCommandline() {
                 if (!mLuaEngine) {
                     beammp_info("Lua not started yet, please try again in a second");
                 } else {
-                    std::string prefix {}; // stores non-table part of input
+                    std::string prefix { }; // stores non-table part of input
                     for (size_t i = stub.length(); i > 0; i--) { // separate table from input
                         if (!std::isalnum(stub[i - 1]) && stub[i - 1] != '_' && stub[i - 1] != '.') {
                             prefix = stub.substr(0, i);

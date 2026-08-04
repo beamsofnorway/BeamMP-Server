@@ -18,31 +18,19 @@
 
 #pragma once
 
-#include <optional>
-#include <string>
-#include <string_view>
-namespace Env {
+#include <boost/asio/io_context.hpp>
+#include <boost/asio/executor_work_guard.hpp>
+#include <thread>
 
-enum class Key {
-    MAX_CONCURRENT_CONNECTIONS,
-    // provider settings
-    PROVIDER_UPDATE_MESSAGE,
-    PROVIDER_DISABLE_CONFIG,
-    PROVIDER_DISABLE_MP_SET,
-    PROVIDER_PORT_ENV,
-    PROVIDER_IP_ENV,
+class TIoPollThread {
+public:
+    TIoPollThread();
+    ~TIoPollThread();
 
-    // HTTP API settings
-    HTTP_API_ENABLED,
-    HTTP_API_HOST,
-    HTTP_API_PORT,
-    HTTP_API_TOKEN
+    boost::asio::io_context& IoCtx() noexcept { return mIoCtx; }
+
+private:
+    boost::asio::io_context mIoCtx;
+    boost::asio::executor_work_guard<boost::asio::io_context::executor_type> mWorkGuard;
+    std::jthread mThread;
 };
-
-std::optional<std::string> Get(Key key);
-bool Set(Key key, std::string_view value);
-bool Set(std::string_view key, std::string_view value);
-
-std::string_view ToString(Key key);
-
-}

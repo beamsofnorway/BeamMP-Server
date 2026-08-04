@@ -106,7 +106,13 @@ TClient::TSpatialOffset TClient::GetSpatialOffset() const {
     return mSpatialOffset;
 }
 
-void TClient::Disconnect(std::string_view Reason) {
+bool TClient::Disconnect(std::string_view Reason) {
+    // Do not remove this guard: concurrent close() on the same socket can crash in Asio internals.
+    EDisconnectState Expected = EDisconnectState::Connected;
+    if (!mDisconnectState.compare_exchange_strong(Expected, EDisconnectState::Disconnecting, std::memory_order_acq_rel, std::memory_order_acquire)) {
+        return false;
+    }
+
     beammp_debugf("Disconnecting client {} for reason: {}", GetID(), Reason);
     {
         std::unique_lock lock(mDisconnectMutex);
@@ -131,6 +137,9 @@ void TClient::Disconnect(std::string_view Reason) {
     } else {
         beammp_debug("Socket is already closed.");
     }
+    // Terminal state: this client must not perform TCP IO after this point.
+    mDisconnectState.store(EDisconnectState::Disconnected, std::memory_order_release);
+    return true;
 }
 
 void TClient::SetCarPosition(int Ident, const std::string& Data) {
@@ -196,7 +205,7 @@ void TClient::EnqueueTCPWrite(std::vector<uint8_t>&& Packet) {
 bool TClient::WaitForNextTCPWrite(std::vector<uint8_t>& Packet) {
     std::unique_lock lock(mTCPWriteMutex);
     mTCPWriteCV.wait(lock, [&] {
-        return !mPendingTCPWrites.empty() || IsDisconnected();
+        return !mPendingTCPWrites.empty() || IsDisconnectRequested() || IsDisconnected();
     });
 
     if (mPendingTCPWrites.empty()) {
@@ -258,8 +267,7 @@ std::optional<std::weak_ptr<TClient>> GetClient(TServer& Server, int ID) {
     std::optional<std::weak_ptr<TClient>> MaybeClient { std::nullopt };
     Server.ForEachClient([&](std::weak_ptr<TClient> CPtr) -> bool {
         ReadLock Lock(Server.GetClientMutex());
-        if (!CPtr.expired()) {
-            auto C = CPtr.lock();
+        if (auto C = CPtr.lock()) {
             if (C->GetID() == ID) {
                 MaybeClient = CPtr;
                 return false;
