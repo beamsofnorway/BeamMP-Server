@@ -1,3 +1,19 @@
+# BeamMP-Server (minor-bon)
+
+## minor-bon Overview
+
+`minor-bon` tracks the upstream `minor` branch while carrying BON-specific server extensions. It is not an official upstream BeamMP build.
+
+Additional functionality in this branch:
+
+- Authenticated HTTP control API for server, player, resource, event, notification, dialog, vehicle, and spatial operations. See [HTTP_API.md](HTTP_API.md) for configuration, authentication, and endpoint details.
+- Command-line startup configuration overrides and a no-config startup mode for managed deployments.
+- Spatial offset, teleport, and rebase control flows used by BON world streaming.
+- Local-only helper vehicle support, so server-side helper/static-prop vehicles are not replicated as normal player vehicles.
+- Serialized per-client TCP writes and disconnect handling for reliable high-volume custom event delivery.
+
+## Original README Follows
+
 # BeamMP-Server
 
 [![CMake Windows Build](https://github.com/BeamMP/BeamMP-Server/workflows/CMake%20Windows%20Build/badge.svg?branch=master)](https://github.com/BeamMP/BeamMP-Server/actions?query=workflow%3A%22CMake+Windows+Build%22)
