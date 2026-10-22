@@ -127,4 +127,4 @@ Example teleport body:
 - `GET /api/players/vehicle-position` returns both the player snapshot and the selected vehicle snapshot
 - `GET /api/players/vehicle-position/raw` returns the raw packet payload for controller-side parsing
 - Recent log and event endpoints are designed for incremental polling
-- This branch does not yet include the later spatial offset endpoints added with the rebase work
+- Spatial offsets can be queried and updated with the `spatial.offset.get` and `spatial.offset.set` control actions
