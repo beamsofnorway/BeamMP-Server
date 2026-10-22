@@ -33,6 +33,8 @@ class TConfig {
 public:
     explicit TConfig(const std::string& ConfigFileName);
 
+    static bool ApplyStartupSettingOverride(std::string_view Assignment);
+
     [[nodiscard]] bool Failed() const { return mFailed; }
 
     void FlushToFile();

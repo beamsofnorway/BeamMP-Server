@@ -30,7 +30,7 @@ Settings::Settings() {
         { General_Map, std::string("/levels/gridmap_v2/info.json") },
         { General_AuthKey, std::string("") },
         { General_Private, true },
-        { General_IP, "::"},
+        { General_IP, std::string("::") },
         { General_Port, 30814 },
         { General_MaxCars, 1 },
         { General_LogChat, true },
@@ -46,7 +46,7 @@ Settings::Settings() {
         { SpatialRebase_AutoRetriggerBandMeters, 8 },
         { SpatialRebase_AutoCooldownMs, 1000 },
         { Misc_ImScaredOfUpdates, true },
-        { Misc_UpdateReminderTime, "30s" }
+        { Misc_UpdateReminderTime, std::string("30s") }
     };
 
     InputAccessMapping = std::unordered_map<ComposedKey, SettingsAccessControl> {

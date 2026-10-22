@@ -68,6 +68,14 @@ static const uint8_t MAX_CONCURRENT_CONNECTIONS = []() -> uint8_t {
 namespace {
 using json = nlohmann::json;
 
+boost::asio::ip::address NormalizeClientAddress(const boost::asio::ip::address& Address) {
+    // IPv4 listeners return native IPv4 addresses; only cast actual IPv6 addresses.
+    if (Address.is_v6() && Address.to_v6().is_v4_mapped()) {
+        return boost::asio::ip::make_address_v4(ip::v4_mapped_t::v4_mapped, Address.to_v6());
+    }
+    return Address;
+}
+
 std::optional<std::vector<uint8_t>> TranslatePositionPacketForRecipient(const std::vector<uint8_t>& Packet, const TClient::TSpatialOffset& SourceOffset, const TClient::TSpatialOffset& RecipientOffset) {
     if (SourceOffset == RecipientOffset) {
         return std::nullopt;
@@ -97,6 +105,14 @@ std::optional<std::vector<uint8_t>> TranslatePositionPacketForRecipient(const st
 
     return StringToVector(PacketString.substr(0, DataStart) + Payload.dump());
 }
+}
+
+TEST_CASE("NormalizeClientAddress accepts IPv4 and IPv6 clients") {
+    CHECK_EQ(NormalizeClientAddress(ip::make_address("127.0.0.1")).to_string(), "127.0.0.1");
+    CHECK_EQ(NormalizeClientAddress(ip::make_address("192.0.2.42")).to_string(), "192.0.2.42");
+    CHECK_EQ(NormalizeClientAddress(ip::make_address("::ffff:192.0.2.42")).to_string(), "192.0.2.42");
+    CHECK_EQ(NormalizeClientAddress(ip::make_address("::1")).to_string(), "::1");
+    CHECK_EQ(NormalizeClientAddress(ip::make_address("2001:db8::42")).to_string(), "2001:db8::42");
 }
 
 TEST_CASE("TranslatePositionPacketForRecipient") {
@@ -441,14 +457,9 @@ std::string HashPassword(const std::string& str) {
 
 std::shared_ptr<TClient> TNetwork::Authentication(TConnection&& RawConnection) {
     auto Client = CreateClient(std::move(RawConnection.Socket));
-    std::string ip = "";
-    if (RawConnection.SockAddr.address().to_v6().is_v4_mapped()) {
-        ip = boost::asio::ip::make_address_v4(ip::v4_mapped_t::v4_mapped, RawConnection.SockAddr.address().to_v6()).to_string();
-    } else {
-        ip = RawConnection.SockAddr.address().to_string();
-    }
-    Client->SetIdentifier("ip", ip);
-    beammp_tracef("This thread is ip {} ({})", ip, RawConnection.SockAddr.address().to_v6().is_v4_mapped() ? "IPv4 mapped IPv6" : "IPv6");
+    const auto ClientAddress = NormalizeClientAddress(RawConnection.SockAddr.address());
+    Client->SetIdentifier("ip", ClientAddress.to_string());
+    beammp_tracef("This thread is ip {} ({})", ClientAddress.to_string(), ClientAddress.is_v4() ? "IPv4" : "IPv6");
 
     if (Application::GetSubsystemStatuses().at("Main") == Application::Status::Starting) {
         ClientKick(*Client, "The server is still starting, please try joining again later.");

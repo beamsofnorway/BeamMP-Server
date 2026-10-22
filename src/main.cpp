@@ -64,7 +64,9 @@ ARGUMENTS:
                         ServerConfig.toml.
     --setting=Section.Key=value
                         Applies a startup setting override before
-                        server initialization. Can be repeated.
+                        server initialization. Overrides ENV and
+                        ServerConfig. Can be repeated; last value
+                        wins. --port takes priority over General.Port.
     --version
                         Prints version info and exits.
 
@@ -83,65 +85,6 @@ struct MainArguments {
 };
 
 int BeamMPServerMain(MainArguments Arguments);
-
-namespace {
-std::optional<std::string_view> EnvVarForStartupSetting(const ComposedKey& key)
-{
-    if (key.Category == "General") {
-        if (key.Key == "AuthKey") return "BEAMMP_AUTH_KEY";
-        if (key.Key == "Name") return "BEAMMP_NAME";
-        if (key.Key == "Map") return "BEAMMP_MAP";
-        if (key.Key == "ResourceFolder") return "BEAMMP_RESOURCE_FOLDER";
-        if (key.Key == "AllowGuests") return "BEAMMP_ALLOW_GUESTS";
-    }
-    if (key.Category == "HttpApi") {
-        if (key.Key == "Enabled") return "BEAMMP_HTTP_API_ENABLED";
-        if (key.Key == "Host") return "BEAMMP_HTTP_API_HOST";
-        if (key.Key == "Port") return "BEAMMP_HTTP_API_PORT";
-        if (key.Key == "Token") return "BEAMMP_HTTP_API_TOKEN";
-    }
-    if (key.Category == "SpatialRebase") {
-        if (key.Key == "AutoSafeLimitMeters") return "BEAMMP_SPATIAL_REBASE_AUTO_SAFE_LIMIT_METERS";
-        if (key.Key == "AutoRetriggerBandMeters") return "BEAMMP_SPATIAL_REBASE_AUTO_RETRIGGER_BAND_METERS";
-        if (key.Key == "AutoCooldownMs") return "BEAMMP_SPATIAL_REBASE_AUTO_COOLDOWN_MS";
-    }
-    return std::nullopt;
-}
-
-std::optional<ComposedKey> ParseComposedKey(std::string_view Raw) {
-    const auto Dot = Raw.find('.');
-    if (Dot == std::string_view::npos || Dot == 0 || Dot == Raw.size() - 1) {
-        return std::nullopt;
-    }
-    return ComposedKey { std::string(Raw.substr(0, Dot)), std::string(Raw.substr(Dot + 1)) };
-}
-
-bool ApplyStartupSettingOverride(std::string_view Assignment) {
-    const auto Equals = Assignment.find('=');
-    if (Equals == std::string_view::npos || Equals == 0 || Equals == Assignment.size() - 1) {
-        beammp_error("Invalid --setting override '" + std::string(Assignment) + "'. Expected Section.Key=value");
-        return false;
-    }
-
-    const auto MaybeKey = ParseComposedKey(Assignment.substr(0, Equals));
-    if (!MaybeKey.has_value()) {
-        beammp_error("Invalid --setting override key '" + std::string(Assignment.substr(0, Equals)) + "'. Expected Section.Key");
-        return false;
-    }
-
-    const std::string Value = std::string(Assignment.substr(Equals + 1));
-
-    if (const auto EnvVar = EnvVarForStartupSetting(*MaybeKey); EnvVar.has_value()) {
-        if (!Env::Set(*EnvVar, Value)) {
-            beammp_error("Failed applying --setting override via environment for '" + MaybeKey->Category + "." + MaybeKey->Key + "'");
-            return false;
-        }
-    }
-
-    beammp_info("Startup override applied: " + MaybeKey->Category + "." + MaybeKey->Key);
-    return true;
-}
-}
 
 int main(int argc, char** argv) {
     MainArguments Args { argc, argv, {}, argv[0] };
@@ -209,7 +152,7 @@ int BeamMPServerMain(MainArguments Arguments) {
     }
 
     for (const auto& SettingOverride : Parser.GetValuesOfArgument({ "setting" })) {
-        if (!ApplyStartupSettingOverride(SettingOverride)) {
+        if (!TConfig::ApplyStartupSettingOverride(SettingOverride)) {
             return 1;
         }
     }
@@ -249,8 +192,7 @@ int BeamMPServerMain(MainArguments Arguments) {
 
     SetupSignalHandlers();
 
-    Settings settings {};
-    beammp_infof("Server name set in new impl: {}", settings.getAsString(Settings::Key::General_Name));
+    beammp_infof("Server name: {}", Application::Settings.getAsString(Settings::Key::General_Name));
 
     bool Shutdown = false;
     Application::RegisterShutdownHandler([&Shutdown] {

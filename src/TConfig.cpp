@@ -18,9 +18,11 @@
 
 #include "Common.h"
 
+#include "ArgsParser.h"
 #include "Env.h"
 #include "Settings.h"
 #include "TConfig.h"
+#include <chrono>
 #include <cstdlib>
 #include <exception>
 #include <fstream>
@@ -85,6 +87,195 @@ static constexpr std::string_view StrHideUpdateMessages = "ImScaredOfUpdates";
 static constexpr std::string_view EnvStrHideUpdateMessages = "BEAMMP_IM_SCARED_OF_UPDATES";
 static constexpr std::string_view StrUpdateReminderTime = "UpdateReminderTime";
 static constexpr std::string_view EnvStrUpdateReminderTime = "BEAMMP_UPDATE_REMINDER_TIME";
+
+namespace {
+struct ConfigSetting {
+    std::string_view Category;
+    std::string_view Name;
+    std::string_view Environment;
+    Settings::Key Key;
+};
+
+// Both startup overrides and the config loader use this registry.
+constexpr ConfigSetting ConfigSettings[] = {
+    { "General", StrDebug, EnvStrDebug, Settings::General_Debug },
+    { "General", StrPrivate, EnvStrPrivate, Settings::General_Private },
+    { "General", StrInformationPacket, EnvStrInformationPacket, Settings::General_InformationPacket },
+    { "General", StrPort, EnvStrPort, Settings::General_Port },
+    { "General", StrIP, EnvStrIP, Settings::General_IP },
+    { "General", StrMaxCars, EnvStrMaxCars, Settings::General_MaxCars },
+    { "General", StrMaxPlayers, EnvStrMaxPlayers, Settings::General_MaxPlayers },
+    { "General", StrMap, EnvStrMap, Settings::General_Map },
+    { "General", StrName, EnvStrName, Settings::General_Name },
+    { "General", StrDescription, EnvStrDescription, Settings::General_Description },
+    { "General", StrTags, EnvStrTags, Settings::General_Tags },
+    { "General", StrResourceFolder, EnvStrResourceFolder, Settings::General_ResourceFolder },
+    { "General", StrAuthKey, EnvStrAuthKey, Settings::General_AuthKey },
+    { "General", StrLogChat, EnvStrLogChat, Settings::General_LogChat },
+    { "General", StrAllowGuests, EnvStrAllowGuests, Settings::General_AllowGuests },
+    { "HttpApi", StrHttpApiEnabled, EnvStrHttpApiEnabled, Settings::HttpApi_Enabled },
+    { "HttpApi", StrHttpApiHost, EnvStrHttpApiHost, Settings::HttpApi_Host },
+    { "HttpApi", StrHttpApiPort, EnvStrHttpApiPort, Settings::HttpApi_Port },
+    { "HttpApi", StrHttpApiToken, EnvStrHttpApiToken, Settings::HttpApi_Token },
+    { "SpatialRebase", StrSpatialRebaseAutoSafeLimitMeters, EnvStrSpatialRebaseAutoSafeLimitMeters, Settings::SpatialRebase_AutoSafeLimitMeters },
+    { "SpatialRebase", StrSpatialRebaseAutoRetriggerBandMeters, EnvStrSpatialRebaseAutoRetriggerBandMeters, Settings::SpatialRebase_AutoRetriggerBandMeters },
+    { "SpatialRebase", StrSpatialRebaseAutoCooldownMs, EnvStrSpatialRebaseAutoCooldownMs, Settings::SpatialRebase_AutoCooldownMs },
+    { "Misc", StrHideUpdateMessages, EnvStrHideUpdateMessages, Settings::Misc_ImScaredOfUpdates },
+    { "Misc", StrUpdateReminderTime, EnvStrUpdateReminderTime, Settings::Misc_UpdateReminderTime },
+};
+
+std::string EnvironmentForSetting(const ConfigSetting& Setting) {
+    if (Setting.Key == Settings::General_Port) {
+        return Env::Get(Env::Key::PROVIDER_PORT_ENV).value_or(std::string(Setting.Environment));
+    }
+    if (Setting.Key == Settings::General_IP) {
+        return Env::Get(Env::Key::PROVIDER_IP_ENV).value_or(std::string(Setting.Environment));
+    }
+    return std::string(Setting.Environment);
+}
+}
+
+bool TConfig::ApplyStartupSettingOverride(std::string_view Assignment) {
+    const auto Equals = Assignment.find('=');
+    if (Equals == std::string_view::npos || Equals == 0 || Equals == Assignment.size() - 1) {
+        beammp_error("Invalid --setting override. Expected Section.Key=value");
+        return false;
+    }
+    const auto RawKey = Assignment.substr(0, Equals);
+    const auto Dot = RawKey.find('.');
+    if (Dot == std::string_view::npos || Dot == 0 || Dot == RawKey.size() - 1) {
+        beammp_error("Invalid --setting override key. Expected Section.Key");
+        return false;
+    }
+    const ComposedKey Key { std::string(RawKey.substr(0, Dot)), std::string(RawKey.substr(Dot + 1)) };
+    const std::string Value(Assignment.substr(Equals + 1));
+    for (const auto& Setting : ConfigSettings) {
+        if (Setting.Category != Key.Category || Setting.Name != Key.Key) {
+            continue;
+        }
+        // Validate against the same types used by the loader before changing the environment.
+        Settings ValidationSettings;
+        std::string Error;
+        if (!ValidationSettings.setByKeyString(Key, Value, Error)) {
+            beammp_error(Error);
+            return false;
+        }
+        if (!Env::Set(EnvironmentForSetting(Setting), Value)) {
+            beammp_error("Failed applying --setting override via environment for '" + std::string(RawKey) + "'");
+            return false;
+        }
+        beammp_info("Startup override applied: " + std::string(RawKey));
+        return true;
+    }
+    beammp_error("Unknown --setting override key '" + std::string(RawKey) + "'");
+    return false;
+}
+
+TEST_CASE("startup setting overrides") {
+    struct StartupFixture {
+        std::unordered_map<std::string, std::string> Environment;
+        std::unordered_map<Settings::Key, Settings::SettingsTypeVariant> OriginalSettings = *Application::Settings.SettingsMap;
+        const std::string File = (fs::temp_directory_path() / ("beammp-startup-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()) + ".toml")).string();
+
+        void Clear(std::string Name) {
+            const auto* Value = std::getenv(Name.c_str());
+            Environment.emplace(Name, Value ? Value : "");
+            Env::Set(Name, "");
+        }
+
+        StartupFixture() {
+            // Save redirected provider variables before removing the redirections.
+            for (const auto& Setting : ConfigSettings) {
+                Clear(EnvironmentForSetting(Setting));
+                if (!Environment.contains(std::string(Setting.Environment))) {
+                    Clear(std::string(Setting.Environment));
+                }
+            }
+            Clear(std::string(Env::ToString(Env::Key::PROVIDER_PORT_ENV)));
+            Clear(std::string(Env::ToString(Env::Key::PROVIDER_IP_ENV)));
+            Clear(std::string(Env::ToString(Env::Key::PROVIDER_DISABLE_CONFIG)));
+            Settings Defaults;
+            Application::Settings.SettingsMap = *Defaults.SettingsMap;
+            Env::Set(Env::Key::PROVIDER_DISABLE_CONFIG, "true");
+            Env::Set(EnvStrAuthKey, "00000000-0000-0000-0000-000000000000");
+        }
+
+        ~StartupFixture() {
+            for (const auto& [Name, Value] : Environment) {
+                Env::Set(Name, Value);
+            }
+            Application::Settings.SettingsMap = OriginalSettings;
+            fs::remove(File);
+        }
+    } Fixture;
+
+    SUBCASE("all registered settings reach the active settings without TOML") {
+        Settings Expected;
+        REQUIRE_EQ(std::size(ConfigSettings), Expected.getAccessControlMap().size());
+        for (const auto& Setting : ConfigSettings) {
+            const auto Default = Expected.get(Setting.Key);
+            std::string Value = "custom value=with spaces";
+            if (std::holds_alternative<bool>(Default)) {
+                Value = "false";
+            } else if (std::holds_alternative<int>(Default)) {
+                Value = "23";
+            }
+            const ComposedKey Key { std::string(Setting.Category), std::string(Setting.Name) };
+            std::string Error;
+            REQUIRE(Expected.setByKeyString(Key, Value, Error));
+            REQUIRE(TConfig::ApplyStartupSettingOverride(Key.Category + "." + Key.Key + "=" + Value));
+        }
+        TConfig Config(Fixture.File);
+        REQUIRE_FALSE(Config.Failed());
+        CHECK_FALSE(fs::exists(Fixture.File));
+        for (const auto& Setting : ConfigSettings) {
+            CHECK(Application::Settings.get(Setting.Key) == Expected.get(Setting.Key));
+        }
+    }
+
+    SUBCASE("last repeated CLI value wins over environment and TOML") {
+        Env::Set(Env::Key::PROVIDER_DISABLE_CONFIG, "false");
+        Application::Settings.set(Settings::General_Description, std::string("TOML description"));
+        TConfig InitialConfig(Fixture.File);
+        REQUIRE_FALSE(InitialConfig.Failed());
+        Env::Set(EnvStrDescription, "environment description");
+        ArgsParser Parser;
+        Parser.RegisterArgument({ "setting" }, ArgsParser::HAS_VALUE);
+        Parser.Parse({ "--setting=General.Description=first", "--setting=General.Description=last value=a=b", "--setting=General.Private=false", "--setting=General.MaxPlayers=23" });
+        REQUIRE(Parser.Verify());
+        for (const auto& Value : Parser.GetValuesOfArgument({ "setting" })) {
+            REQUIRE(TConfig::ApplyStartupSettingOverride(Value));
+        }
+        TConfig Config(Fixture.File);
+        REQUIRE_FALSE(Config.Failed());
+        CHECK_EQ(Application::Settings.getAsString(Settings::General_Description), "last value=a=b");
+        CHECK_FALSE(Application::Settings.getAsBool(Settings::General_Private));
+        CHECK_EQ(Application::Settings.getAsInt(Settings::General_MaxPlayers), 23);
+    }
+
+    SUBCASE("unknown keys and invalid values are rejected without changing the environment") {
+        Env::Set(EnvStrMaxPlayers, "17");
+        for (const auto* Assignment : { "Unknown.Name=value", "General.Unknown=value", "General.Name.Extra=value", "Name=value", ".Name=value", "General.=value", "General.Name", "General.Name=", "General.Private=maybe", "General.MaxPlayers=23junk", "General.MaxPlayers=99999999999999999999" }) {
+            CHECK_FALSE(TConfig::ApplyStartupSettingOverride(Assignment));
+        }
+        CHECK_EQ(std::string(std::getenv(EnvStrMaxPlayers.data())), "17");
+    }
+
+    SUBCASE("provider IP and port mappings honor CLI overrides") {
+        Fixture.Clear("BEAMMP_TEST_STARTUP_PORT");
+        Fixture.Clear("BEAMMP_TEST_STARTUP_IP");
+        Env::Set(Env::Key::PROVIDER_PORT_ENV, "BEAMMP_TEST_STARTUP_PORT");
+        Env::Set(Env::Key::PROVIDER_IP_ENV, "BEAMMP_TEST_STARTUP_IP");
+        Env::Set("BEAMMP_TEST_STARTUP_PORT", "12345");
+        Env::Set("BEAMMP_TEST_STARTUP_IP", "0.0.0.0");
+        REQUIRE(TConfig::ApplyStartupSettingOverride("General.Port=23456"));
+        REQUIRE(TConfig::ApplyStartupSettingOverride("General.IP=127.0.0.1"));
+        TConfig Config(Fixture.File);
+        REQUIRE_FALSE(Config.Failed());
+        CHECK_EQ(Application::Settings.getAsInt(Settings::General_Port), 23456);
+        CHECK_EQ(Application::Settings.getAsString(Settings::General_IP), "127.0.0.1");
+    }
+}
 
 TEST_CASE("TConfig::TConfig") {
     const std::string CfgFile = "beammp_server_testconfig.toml";
@@ -286,44 +477,9 @@ void TConfig::ParseFromFile(std::string_view name) {
             data = toml::parse(name.data());
         }
 
-        // GENERAL
-
-        // Read into new Settings Singleton
-        TryReadValue(data, "General", StrDebug, EnvStrDebug, Settings::Key::General_Debug);
-        TryReadValue(data, "General", StrPrivate, EnvStrPrivate, Settings::Key::General_Private);
-        TryReadValue(data, "General", StrInformationPacket, EnvStrInformationPacket, Settings::Key::General_InformationPacket);
-        if (Env::Get(Env::Key::PROVIDER_PORT_ENV).has_value()) {
-            TryReadValue(data, "General", StrPort, Env::Get(Env::Key::PROVIDER_PORT_ENV).value(), Settings::Key::General_Port);
-        } else {
-            TryReadValue(data, "General", StrPort, EnvStrPort, Settings::Key::General_Port);
+        for (const auto& Setting : ConfigSettings) {
+            TryReadValue(data, std::string(Setting.Category), Setting.Name, EnvironmentForSetting(Setting), Setting.Key);
         }
-        if (Env::Get(Env::Key::PROVIDER_IP_ENV).has_value()) {
-            TryReadValue(data, "General", StrIP, Env::Get(Env::Key::PROVIDER_IP_ENV).value(), Settings::Key::General_IP);
-        } else {
-            TryReadValue(data, "General", StrIP, EnvStrIP, Settings::Key::General_IP);
-        }
-        TryReadValue(data, "General", StrMaxCars, EnvStrMaxCars, Settings::Key::General_MaxCars);
-        TryReadValue(data, "General", StrMaxPlayers, EnvStrMaxPlayers, Settings::Key::General_MaxPlayers);
-        TryReadValue(data, "General", StrMap, EnvStrMap, Settings::Key::General_Map);
-        TryReadValue(data, "General", StrName, EnvStrName, Settings::Key::General_Name);
-        TryReadValue(data, "General", StrDescription, EnvStrDescription, Settings::Key::General_Description);
-        TryReadValue(data, "General", StrTags, EnvStrTags, Settings::Key::General_Tags);
-        TryReadValue(data, "General", StrResourceFolder, EnvStrResourceFolder, Settings::Key::General_ResourceFolder);
-        TryReadValue(data, "General", StrAuthKey, EnvStrAuthKey, Settings::Key::General_AuthKey);
-        TryReadValue(data, "General", StrLogChat, EnvStrLogChat, Settings::Key::General_LogChat);
-        TryReadValue(data, "General", StrAllowGuests, EnvStrAllowGuests, Settings::Key::General_AllowGuests);
-        // HTTP API
-        TryReadValue(data, "HttpApi", StrHttpApiEnabled, EnvStrHttpApiEnabled, Settings::Key::HttpApi_Enabled);
-        TryReadValue(data, "HttpApi", StrHttpApiHost, EnvStrHttpApiHost, Settings::Key::HttpApi_Host);
-        TryReadValue(data, "HttpApi", StrHttpApiPort, EnvStrHttpApiPort, Settings::Key::HttpApi_Port);
-        TryReadValue(data, "HttpApi", StrHttpApiToken, EnvStrHttpApiToken, Settings::Key::HttpApi_Token);
-        // SPATIAL REBASE
-        TryReadValue(data, "SpatialRebase", StrSpatialRebaseAutoSafeLimitMeters, EnvStrSpatialRebaseAutoSafeLimitMeters, Settings::Key::SpatialRebase_AutoSafeLimitMeters);
-        TryReadValue(data, "SpatialRebase", StrSpatialRebaseAutoRetriggerBandMeters, EnvStrSpatialRebaseAutoRetriggerBandMeters, Settings::Key::SpatialRebase_AutoRetriggerBandMeters);
-        TryReadValue(data, "SpatialRebase", StrSpatialRebaseAutoCooldownMs, EnvStrSpatialRebaseAutoCooldownMs, Settings::Key::SpatialRebase_AutoCooldownMs);
-        // Misc
-        TryReadValue(data, "Misc", StrHideUpdateMessages, EnvStrHideUpdateMessages, Settings::Key::Misc_ImScaredOfUpdates);
-        TryReadValue(data, "Misc", StrUpdateReminderTime, EnvStrUpdateReminderTime, Settings::Key::Misc_UpdateReminderTime);
 
     } catch (const std::exception& err) {
         beammp_error("Error parsing config file value: " + std::string(err.what()));
