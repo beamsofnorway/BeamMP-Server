@@ -64,6 +64,54 @@ static const uint8_t MAX_CONCURRENT_CONNECTIONS = []() -> uint8_t {
 
     return 10;
 }();
+
+namespace {
+using json = nlohmann::json;
+
+std::optional<std::vector<uint8_t>> TranslatePositionPacketForRecipient(const std::vector<uint8_t>& Packet, const TClient::TSpatialOffset& SourceOffset, const TClient::TSpatialOffset& RecipientOffset) {
+    if (SourceOffset == RecipientOffset) {
+        return std::nullopt;
+    }
+
+    const std::string PacketString(Packet.begin(), Packet.end());
+    const auto DataStart = PacketString.find('{');
+    if (DataStart == std::string::npos) {
+        return std::nullopt;
+    }
+
+    auto Payload = json::parse(PacketString.substr(DataStart), nullptr, false);
+    if (Payload.is_discarded() || !Payload.is_object() || !Payload.contains("pos")) {
+        return std::nullopt;
+    }
+
+    auto& Position = Payload["pos"];
+    if (!Position.is_array() || Position.size() < 3
+        || !Position[0].is_number() || !Position[1].is_number() || !Position[2].is_number()) {
+        return std::nullopt;
+    }
+
+    // Position packets are in the sender's local frame; express them in the recipient's frame.
+    for (size_t Index = 0; Index < 3; ++Index) {
+        Position[Index] = Position[Index].get<double>() + SourceOffset[Index] - RecipientOffset[Index];
+    }
+
+    return StringToVector(PacketString.substr(0, DataStart) + Payload.dump());
+}
+}
+
+TEST_CASE("TranslatePositionPacketForRecipient") {
+    const auto Packet = StringToVector(R"(Zp:10-20:{"pos":[1.5,-2.0,3.0],"vel":[0,0,0]})");
+    const auto Translated = TranslatePositionPacketForRecipient(Packet, { 100.0, 200.0, 0.0 }, { 10.0, 20.0, 0.0 });
+
+    REQUIRE(Translated.has_value());
+    const std::string TranslatedPacket(Translated->begin(), Translated->end());
+    const auto Payload = json::parse(TranslatedPacket.substr(TranslatedPacket.find('{')));
+    CHECK_EQ(Payload["pos"][0].get<double>(), 91.5);
+    CHECK_EQ(Payload["pos"][1].get<double>(), 178.0);
+    CHECK_EQ(Payload["pos"][2].get<double>(), 3.0);
+
+    CHECK(!TranslatePositionPacketForRecipient(Packet, { 100.0, 200.0, 0.0 }, { 100.0, 200.0, 0.0 }));
+}
 static constexpr uint8_t READ_TIMEOUT_S = 10; // seconds
 
 std::vector<uint8_t> StringToVector(const std::string& Str) {
@@ -1425,6 +1473,20 @@ void TNetwork::SendToAll(TClient* c, const std::vector<uint8_t>& Data, bool Self
         // TODO: handle
     }
     return;
+}
+
+void TNetwork::SendPositionToAll(TClient& Source, const std::vector<uint8_t>& Data) {
+    const auto SourceOffset = Source.GetSpatialOffset();
+    mServer.ForEachClient([&](const std::weak_ptr<TClient>& ClientPtr) -> bool {
+        const auto Recipient = ClientPtr.lock();
+        if (!Recipient || Recipient.get() == &Source || (!Recipient->IsSynced() && !Recipient->IsSyncing())) {
+            return true;
+        }
+
+        const auto Translated = TranslatePositionPacketForRecipient(Data, SourceOffset, Recipient->GetSpatialOffset());
+        (void)Respond(*Recipient, Translated.value_or(Data), false);
+        return true;
+    });
 }
 
 bool TNetwork::UDPSend(TClient& Client, std::vector<uint8_t> Data) {

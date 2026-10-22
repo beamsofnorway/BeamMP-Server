@@ -421,7 +421,7 @@ void TServer::GlobalParser(const std::weak_ptr<TClient>& Client, std::vector<uin
             return;
         }
 
-        Network.SendToAll(LockedClient.get(), Packet, false, false);
+        Network.SendPositionToAll(*LockedClient, Packet);
         HandlePosition(*LockedClient, StringPacket);
         return;
     }
